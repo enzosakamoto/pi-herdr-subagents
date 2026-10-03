@@ -2,13 +2,32 @@
 
 [Português (Brasil)](README.pt-BR.md)
 
-Asynchronous pi subagents, visibly running in Herdr terminal panes.
+Asynchronous pi subagents, visibly running in Herdr terminal panes. Delegate independent work, keep working while fresh pi sessions run in parallel, and receive each result as a follow-up in the principal session.
 
-**Status: implemented MVP, verified with pi 1.0.0 and Herdr 0.9.3 (protocol 22).**
-Local-only repository: no remote, npm publication or automatic personal installation.
-See the [verification report](docs/superpowers/plans/2026-10-03-verification.md) for coverage and limitations.
+<!-- HERO VIDEO: embed the demo here, or use a thumbnail linked to the hosted video. -->
 
-## Behavior
+## Quick start
+
+Requirements: pi, a compatible Herdr server/CLI, the pi lifecycle integration, and model credentials available to child sessions. The tested versions and operational constraints are listed below.
+
+Try from a local checkout without saving personal settings:
+
+```bash
+pi -e /absolute/path/to/pi-herdr-subagents
+```
+
+In pi, delegate an independent task, for example: “Inspect the authentication flow. Do not modify files; report relevant paths and risks.” The child opens in a Herdr pane; the principal can continue working and receives a tagged follow-up when the result is ready. For model configuration, recovery behavior, and test instructions, use the sections below.
+
+## Contents
+
+- [Behavior and limits](#behavior-and-limits)
+- [Requirements and installation](#requirements-and-installation)
+- [Tool: `herdr_subagent`](#tool-herdr_subagent)
+- [Model tiers and configuration](#model-tiers-and-configuration)
+- [Persistence and recovery](#persistence-and-recovery)
+- [Verification](#verification)
+
+## Behavior and limits
 
 The principal reserves a task and continues working while a fresh pi TUI child starts.
 Children use a configured model tier, an explicit model override, or inherit the principal's
@@ -44,14 +63,15 @@ selected another pane/tab/workspace during the mutation, the extension does not 
 
 ## Requirements and installation
 
-- pi with the installed extension/structured-tool contracts (tested: 1.0.0).
-- Compatible Herdr server/CLI (tested: 0.9.3, protocol 22).
-- Principal inside Herdr: `HERDR_ENV=1` and a managed caller pane.
-- Working Herdr pi lifecycle integration; tested with v9. Check with
-  `herdr integration status`. Install/update separately if needed; this package never
-  changes `herdr-agent-state.ts` or your settings.
-- Model credentials usable by child pi sessions. Conversations are isolated, **files,
-  credentials and OS permissions are not**. Assign disjoint write ownership.
+| Component | Requirement / tested version |
+|---|---|
+| pi | Installed extension and structured-tool contracts; tested with 1.0.0 |
+| Herdr server/CLI | Compatible version; tested with 0.9.3 (protocol 22) |
+| Lifecycle integration | Working pi integration; tested with v9 (`herdr integration status`) |
+| Runtime for development tests | Node 24+ and npm |
+
+Additional operating constraints: run the principal inside Herdr (`HERDR_ENV=1` with a managed caller pane), and provide model credentials usable by child pi processes. Sessions are separate, but **files, credentials, and OS permissions are shared**; assign disjoint write ownership. The initial tab must contain only the principal and must not be zoomed. See [Behavior and limits](#behavior-and-limits).
+The lifecycle integration is installed/updated separately; this package never changes `herdr-agent-state.ts` or your settings.
 
 Try without saving personal settings:
 
@@ -66,9 +86,14 @@ pi install /absolute/path/to/pi-herdr-subagents
 # Then /reload in pi.
 ```
 
-After creating your own remote (none exists here), Git installation uses
-`pi install git:github.com/OWNER/pi-herdr-subagents`; replace OWNER with a real repository.
-No npm license/publication decision is made by this package.
+Install from the GitHub repository with:
+
+```bash
+pi install git:github.com/enzosakamoto/pi-herdr-subagents
+# Then /reload in pi.
+```
+
+This package is not published on npm.
 
 ## Tool: herdr_subagent
 
@@ -221,6 +246,8 @@ resume can reconcile owned survivors. Never repair by killing/restarting workers
 closing user panes. Do not race the extension with raw pane control.
 
 ## Verification
+
+See the [verification report](docs/superpowers/plans/2026-10-03-verification.md) for coverage and limitations.
 
 Development requires Node 24+ (native TypeScript tests) and npm:
 

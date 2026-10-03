@@ -2,13 +2,32 @@
 
 [English](README.md)
 
-Subagents assíncronos do pi, executados visivelmente em panes do Herdr.
+Subagentes assíncronos do pi, executados visivelmente em panes do Herdr. Delegue trabalho independente, continue trabalhando enquanto novas sessões pi executam em paralelo e receba cada resultado como follow-up na sessão principal.
 
-**Status: MVP implementado, verificado com pi 1.0.0 e Herdr 0.9.3 (protocolo 22).**
-Repositório somente local: sem remoto, publicação npm ou instalação pessoal automática.
-Veja [cobertura e limitações da verificação](docs/superpowers/plans/2026-10-03-verification.md).
+<!-- VÍDEO HERO: insira a demonstração aqui ou use uma miniatura com link para o vídeo hospedado. -->
 
-## Comportamento
+## Início rápido
+
+Requisitos: pi, servidor/CLI Herdr compatível, integração de ciclo de vida do pi e credenciais de modelo acessíveis às sessões-filhas. As versões testadas e restrições operacionais estão abaixo.
+
+Experimente a partir de um checkout local, sem gravar configurações pessoais:
+
+```bash
+pi -e /caminho/absoluto/pi-herdr-subagents
+```
+
+No pi, delegue uma tarefa independente, por exemplo: “Inspecione o fluxo de autenticação. Não altere arquivos; retorne caminhos relevantes e riscos.” O filho abre em um pane do Herdr; o principal pode continuar trabalhando e recebe um follow-up identificado quando o resultado estiver pronto. Consulte as seções abaixo para configuração de modelos, recuperação e testes.
+
+## Conteúdo
+
+- [Comportamento e limites](#comportamento-e-limites)
+- [Requisitos e instalação](#requisitos-e-instalação)
+- [Ferramenta `herdr_subagent`](#ferramenta-herdr_subagent)
+- [Tiers de modelo e configuração](#tiers-de-modelo-e-configuração)
+- [Persistência e recuperação](#persistência-e-recuperação)
+- [Verificação](#verificação)
+
+## Comportamento e limites
 
 O principal reserva uma tarefa e continua trabalhando enquanto um filho pi TUI inicia
 uma sessão nova. Filhos usam um tier configurado, um modelo explícito ou herdam o modelo
@@ -45,14 +64,14 @@ a extensão não toma esse novo foco.
 
 ## Requisitos e instalação
 
-- pi com os contratos de extensão/ferramenta estruturada instalados (testado: 1.0.0).
-- Cliente/servidor Herdr compatíveis (testado: 0.9.3, protocolo 22).
-- Principal dentro do Herdr: `HERDR_ENV=1` e contexto de pane gerenciado.
-- Integração pi de ciclo de vida funcional; testada com v9. Consulte
-  `herdr integration status`. Instalação/atualização é separada; este package nunca
-  altera `herdr-agent-state.ts` nem configurações pessoais.
-- Credenciais de modelo utilizáveis pelos filhos. Conversas são isoladas; **arquivos,
-  credenciais e permissões do sistema não são**. Separe responsabilidades de escrita.
+| Componente | Requisito / versão testada |
+|---|---|
+| pi | Contratos de extensão e ferramenta estruturada; testado com 1.0.0 |
+| Servidor/CLI Herdr | Versão compatível; testado com 0.9.3 (protocolo 22) |
+| Integração de ciclo de vida | Integração pi funcional; testada com v9 (`herdr integration status`) |
+| Runtime para testes de desenvolvimento | Node 24+ e npm |
+
+Restrições adicionais: execute o principal dentro do Herdr (`HERDR_ENV=1` e pane gerenciado) e disponibilize credenciais de modelo aos processos filhos. As sessões são separadas, mas **arquivos, credenciais e permissões do sistema são compartilhados**; separe responsabilidades de escrita. A tab inicial deve conter apenas o principal e não pode estar em zoom. A instalação/atualização da integração de ciclo de vida é separada; este package não altera `herdr-agent-state.ts` nem suas configurações.
 
 Experimente sem gravar configurações pessoais:
 
@@ -67,9 +86,14 @@ pi install /caminho/absoluto/pi-herdr-subagents
 # Depois execute /reload no pi.
 ```
 
-Após criar seu próprio remoto (aqui ainda não existe), a instalação Git é
-`pi install git:github.com/OWNER/pi-herdr-subagents`; substitua OWNER por um repositório real.
-O package não escolhe licença/publicação npm pelo usuário.
+Instale do repositório no GitHub:
+
+```bash
+pi install git:github.com/enzosakamoto/pi-herdr-subagents
+# Depois execute /reload no pi.
+```
+
+Este package não é publicado no npm.
 
 ## Ferramenta: herdr_subagent
 
@@ -223,6 +247,8 @@ retomada pode reconciliar sobreviventes próprios. Nunca recuperar matando/reini
 workers ou fechando panes do usuário. Não dispute controle bruto com a extensão.
 
 ## Verificação
+
+Veja [cobertura e limitações da verificação](docs/superpowers/plans/2026-10-03-verification.md).
 
 Desenvolvimento exige Node 24+ (testes TypeScript nativos) e npm:
 
