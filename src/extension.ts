@@ -44,6 +44,14 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
     };
     pi.on("session_start", async (_event, ctx) => { await report(ctx, false); });
     pi.on("agent_settled", async (_event, ctx) => { await report(ctx, true); });
+    let blocks = 0;
+    const reportBlock = async (ctx: ExtensionContext, title?: string) => {
+      if (!child || ctx.mode !== "tui" || ctx.sessionManager.getSessionId() !== child.sessionId) return;
+      await atomicJson(join(child.directory, "blocked.json"), { taskId: child.taskId, sessionId: child.sessionId,
+        sessionPath: ctx.sessionManager.getSessionFile(), active: blocks > 0, title: title?.slice(0, 200) });
+    };
+    pi.on("ui_prompt_start", async (event, ctx) => { blocks++; await reportBlock(ctx, event.title); });
+    pi.on("ui_prompt_end", async (event, ctx) => { blocks = Math.max(0, blocks - 1); await reportBlock(ctx, event.title); });
     return;
   }
   let manager: Tasks | undefined;
@@ -61,20 +69,24 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
     const current = paneRef((await createControl().json(["pane", "current", "--current"])).pane);
     const records = new Map<string, Task>();
     const delivered = new Set<string>();
+    const attentionDelivered = new Set<string>();
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE) {
         const task = entry.data as Task;
         if (task?.taskId) records.set(task.taskId, structuredClone(task));
       } else if (entry.type === "custom_message" && entry.customType === MESSAGE) {
         const data = entry.details as { taskId?: string; attention?: boolean };
-        if (data?.taskId && !data.attention) delivered.add(data.taskId);
+        if (data?.taskId) { if (data.attention) attentionDelivered.add(data.taskId); else delivered.add(data.taskId); }
       } else if (entry.type === "message" && entry.message.role === "toolResult") {
         const details = entry.message.details;
         const ids = details && typeof details === "object" && !Array.isArray(details) ? (details as Record<string, unknown>)[ACCOUNTING] : undefined;
         if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") charged.add(id);
       }
     }
-    for (const task of records.values()) task.notified = delivered.has(task.taskId);
+    for (const task of records.values()) {
+      task.notified = delivered.has(task.taskId);
+      task.attentionSent = attentionDelivered.has(task.taskId);
+    }
     const valid = () => localGeneration === generation;
     const updateUI = () => {
       if (valid() && ctx.mode === "tui" && manager) {

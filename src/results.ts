@@ -17,6 +17,7 @@ export function addUsage(a: Usage, b: Usage): Usage {
   for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) result[key] = a[key] + b[key];
   for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) result.cost[key] = a.cost[key] + b.cost[key];
   if (a.reasoning || b.reasoning) result.reasoning = (a.reasoning ?? 0) + (b.reasoning ?? 0);
+  if (a.cacheWrite1h || b.cacheWrite1h) result.cacheWrite1h = (a.cacheWrite1h ?? 0) + (b.cacheWrite1h ?? 0);
   return result;
 }
 export async function atomicJson(path: string, data: unknown) {
@@ -61,10 +62,12 @@ export async function collect(receipt: Receipt, taskId: string, sessionId: strin
       if (m.role === "assistant" || m.role === "toolResult") {
         u = m.usage;
         if (m.role === "assistant") { provider = m.provider; model = m.model; }
+        else { provider = "unknown"; model = "nested-tool"; } // Usage has no provider attribution.
       }
     } else if ("usage" in entry) {
       u = entry.usage;
       if (entry.type === "usage") { provider = entry.provider; model = entry.model; }
+      else { provider = "unknown"; model = entry.type; }
     }
     if (u) {
       usage = addUsage(usage, u);

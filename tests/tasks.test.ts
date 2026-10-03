@@ -4,6 +4,8 @@ import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Fake, eventually } from "./fake.ts";
+import { HerdrError } from "../src/herdr.ts";
+import { atomicJson } from "../src/results.ts";
 import { paneRef } from "../src/layout.ts";
 import { Tasks, finished, type Task } from "../src/tasks.ts";
 async function setup(t: test.TestContext) {
@@ -114,4 +116,82 @@ test("unknown is not completion, even with a settlement file", async t => {
   fake.panes.get(fake.agents.get(task.agentName)!.pane)!.agent_status = "unknown";
   await eventually(() => manager.task(task.taskId).state === "collection_failed");
   assert.equal(fake.calls.filter(a => a[1] === "close").length, 0);
+});
+test("only explicit pre-launch busy rejection is retried, never an uncertain launch", async t => {
+  const { fake, manager } = await setup(t);
+  let starts = 0;
+  fake.error = args => args[1] === "start" && starts++ === 0 ? new HerdrError("shell not rendered", "agent_pane_busy") : undefined;
+  const task = await manager.spawn("work", "focused specialization");
+  await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
+  assert.equal(fake.calls.filter(a => a[1] === "start").length, 2);
+  assert.equal(fake.agents.size, 1);
+  fake.error = args => args[1] === "start" ? new HerdrError("accepted mutation timeout", "cli_timeout", true) : undefined;
+  const uncertain = await manager.spawn("other work");
+  await eventually(() => !!manager.task(uncertain.taskId).attentionSent);
+  assert.equal(fake.calls.filter(a => a[1] === "start").length, 3);
+  assert.equal(fake.agents.size, 1);
+});
+test("blocked startup never auto-approves/relaunches; status resumes one unsent task after intervention", async t => {
+  const { fake, manager } = await setup(t); fake.startBlocked = true;
+  const task = await manager.spawn("work");
+  await eventually(() => manager.task(task.taskId).state === "blocked" && !!manager.task(task.taskId).attentionSent);
+  assert.equal(fake.calls.filter(a => a[1] === "prompt" || a[1] === "send-keys").length, 0);
+  fake.panes.get(fake.agents.get(task.agentName)!.pane)!.agent_status = "idle"; // Explicit user intervention.
+  await Promise.all([manager.status(task.taskId), manager.status(task.taskId), manager.status(task.taskId)]);
+  await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
+  assert.equal(fake.calls.filter(a => a[1] === "start").length, 1);
+  assert.equal(fake.calls.filter(a => a[1] === "prompt").length, 1);
+  await fake.complete(task.agentName);
+  await eventually(() => finished(manager.task(task.taskId)));
+});
+test("cancel during delayed startup collects diagnostics without submitting the task", async t => {
+  const { fake, manager } = await setup(t);
+  let release!: () => void; fake.delayStart = new Promise<void>(r => { release = r; });
+  const task = await manager.spawn("work");
+  await eventually(() => fake.calls.some(a => a[1] === "start"));
+  await manager.cancel(task.taskId); release();
+  await eventually(() => finished(manager.task(task.taskId)));
+  assert.equal(manager.task(task.taskId).state, "cancelled");
+  assert.equal(fake.calls.filter(a => a[1] === "prompt").length, 0);
+});
+test("manual closure is diagnosed; a closed pane is not a live task target", async t => {
+  const { fake, manager } = await setup(t), task = await manager.spawn("work");
+  await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
+  await fake.json(["pane", "close", fake.agents.get(task.agentName)!.pane]);
+  const status = await manager.status(task.taskId);
+  assert.equal(status.state, "failed"); assert.equal(status.paneId, undefined);
+  assert.match(status.diagnostic!, /Lost or changed/);
+  assert.equal(fake.calls.filter(a => a[1] === "close").length, 1);
+});
+test("compaction failure preserves results and marks cleanup pending, status reconciles survivors", async t => {
+  const { fake, manager } = await setup(t);
+  const [a, b] = await Promise.all([manager.spawn("A"), manager.spawn("B")]);
+  await eventually(() => !!fake.agents.get(b.agentName)?.prompt);
+  fake.error = args => args[1] === "move" ? new HerdrError("layout mutation timeout", "cli_timeout", true) : undefined;
+  await fake.complete(a.agentName);
+  await eventually(() => manager.task(a.taskId).state === "cleanup_pending");
+  assert.ok(manager.task(a.taskId).outcome); assert.equal(manager.task(a.taskId).pane, undefined);
+  fake.error = undefined;
+  const status = await manager.status(a.taskId);
+  assert.equal(status.state, "completed"); assert.ok(status.resultPath);
+  assert.equal(fake.panes.size, 2);
+});
+test("stopped observer suppresses stale completion and notification callbacks", async t => {
+  const { fake, manager, notifications } = await setup(t), task = await manager.spawn("work");
+  await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
+  await manager.stop(); await fake.complete(task.agentName);
+  assert.equal(notifications.length, 0);
+  assert.equal(fake.calls.filter(a => a[1] === "close").length, 0);
+});
+test("UI sidecar reports blocked even after a CLI lifecycle observer is invalidated by staging", async t => {
+  const { fake, manager, notifications } = await setup(t);
+  fake.error = args => args[1] === "prompt" ? new HerdrError("target relocated after submission", "agent_not_running") : undefined;
+  const task = await manager.spawn("work");
+  await eventually(() => !!manager.task(task.taskId).pane?.agentName && manager.task(task.taskId).submitted);
+  const current = manager.task(task.taskId);
+  await atomicJson(join(current.directory, "blocked.json"), { taskId: task.taskId, sessionId: task.sessionId,
+    sessionPath: current.pane!.sessionPath, active: true, title: "Confirm test operation" });
+  await eventually(() => current.state === "blocked" && !!current.attentionSent);
+  assert.equal(notifications.filter(n => n.attention).length, 1);
+  assert.equal(fake.calls.filter(a => a[1] === "send-keys" || a[1] === "close").length, 0);
 });

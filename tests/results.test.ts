@@ -23,7 +23,7 @@ test("active branch, long final response, all text blocks, nested tool usage, pa
   const result = await collect(receipt, taskId, sessionId);
   assert.ok(result.text.length > 100000); assert.ok(result.text.endsWith("second block"));
   assert.equal(result.usage.output, 14); assert.equal(result.usage.input, 3); assert.equal(result.usage.totalTokens, 17);
-  assert.equal(result.modelUsage.length, 1);
+  assert.equal(result.modelUsage.length, 2);
 });
 test("error, aborted and length preserve diagnostics instead of becoming success", async t => {
   for (const reason of ["error", "aborted", "length"]) {

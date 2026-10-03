@@ -1,4 +1,4 @@
-import { type Control, object, string } from "./herdr.ts";
+import { type Control, HerdrError, object, string } from "./herdr.ts";
 
 export interface PaneRef {
   paneId: string; terminalId: string; tabId: string; workspaceId: string;
@@ -51,6 +51,31 @@ export class Layout {
       if (ref.workspaceId !== main.workspaceId || (ref.tabId !== main.tabId && !ref.staging))
         throw new Error("Principal/child topology changed externally; restore the original tab before control.");
       await this.validate(ref);
+    }
+  }
+  async awaitShell(ref: PaneRef) {
+    for (const delay of [0, 100, 200, 400, 800, 1200]) {
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      await this.validate(ref);
+      const info = object((await this.cli.json(["pane", "process-info", "--pane", ref.paneId])).process_info, "process_info");
+      if (typeof info.shell_pid === "number" && info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid &&
+          Array.isArray(info.foreground_processes) && info.foreground_processes.length === 1 &&
+          object(info.foreground_processes[0], "process").pid === info.shell_pid) return;
+    }
+    throw new Error("Reserved pane did not reach its shell foreground; no agent start attempted.");
+  }
+  async startAgent(ref: PaneRef, args: string[]) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await this.awaitShell(ref);
+      try { await this.cli.json(args); return; }
+      catch (e) {
+        // This explicit server rejection happens BEFORE launch. A newly created/moved
+        // shell may be foreground before its interactive prompt has rendered.
+        // Never retry an accepted/uncertain launch, blocked startup or a prompt.
+        if (!(e instanceof HerdrError) || e.code !== "agent_pane_busy" || e.uncertain || attempt === 3) throw e;
+        await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+        await this.validate(ref);
+      }
     }
   }
   private async focusedChild(refs: PaneRef[]) {

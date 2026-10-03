@@ -25,7 +25,8 @@
     "test": "node --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "test:live": "node tests/live.ts",
-    "test:live-tasks": "node tests/live-tasks.ts"
+    "test:live-tasks": "node tests/live-tasks.ts",
+    "test:live-extension": "node tests/live-extension.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

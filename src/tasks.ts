@@ -94,7 +94,7 @@ export class Tasks {
           await writeFile(path, task.instructions, { mode: 0o600 });
           args.push("--append-system-prompt", path);
         }
-        await this.cli.json(args);
+        await this.layout.startAgent(task.pane!, args);
         await this.bind(task);
         const a = await this.layout.validate(task.pane!);
         if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Child is not ready for its single task prompt.");
@@ -125,6 +125,26 @@ export class Tasks {
       } else task.state = "failed";
       await this.save(task);
       await this.attention(task);
+    }
+  }
+  private async resumeStartup(task: Task) {
+    let prompting: Promise<{ error?: unknown }> | undefined;
+    try {
+      await this.layout.serial.run(async () => {
+        if (!this.alive || task.submitted || task.outcome || task.cancelRequested || !task.pane) return;
+        await this.bind(task);
+        const a = await this.layout.validate(task.pane);
+        if (!["idle", "done"].includes(String(a.agent_status))) return;
+        task.submitted = true; task.state = "working"; await this.save(task);
+        prompting = this.cli.json(["agent", "prompt", task.agentName, "[herdr-subagent:" + task.taskId + "]\n" + task.task, "--wait"], undefined, 0)
+          .then(() => ({}), error => ({ error }));
+        try { await this.cli.json(["agent", "wait", task.agentName, "--until", "working", "--timeout", "5000"], undefined, 7000); }
+        catch (e) { task.diagnostic = diagnostic(e); await this.save(task); }
+      });
+      if (prompting && this.alive) { const observed = await prompting; if (this.alive) await this.observe(task, observed.error); }
+    } catch (e) {
+      if (!this.alive) return;
+      task.state = "collection_failed"; task.diagnostic = diagnostic(e); await this.save(task); await this.attention(task);
     }
   }
   private async bind(task: Task) {
@@ -166,7 +186,7 @@ export class Tasks {
   private async waitReceipt(task: Task) {
     const signal = this.controller.signal;
     await new Promise<void>((resolve, reject) => {
-      let closed = false;
+      let closed = false, checking = false, dirty = false;
       const watcher = watch(task.directory, () => { void check(); });
       const close = (error?: unknown) => {
         if (closed) return; closed = true; watcher.close(); signal.removeEventListener("abort", abort);
@@ -174,7 +194,24 @@ export class Tasks {
       };
       const abort = () => close(new Error("Observer stopped."));
       const check = async () => {
-        try { if (await this.receipt(task)) close(); } catch (e) { close(e); }
+        if (checking) { dirty = true; return; }
+        checking = true;
+        try {
+          do {
+            dirty = false;
+            if (await this.receipt(task)) { close(); break; }
+            let block: { taskId: string; sessionId: string; sessionPath: string; active: boolean; title?: string } | undefined;
+            try { block = await readJson(join(task.directory, "blocked.json")); }
+            catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+            if (block && block.taskId === task.taskId && block.sessionId === task.sessionId && block.sessionPath === task.pane?.sessionPath) {
+              if (block.active && task.state !== "blocked") {
+                task.state = "blocked"; task.diagnostic = "Child UI needs intervention: " + (block.title ?? "approval/question");
+                await this.save(task); await this.attention(task);
+              } else if (!block.active && task.state === "blocked") { task.state = "working"; await this.save(task); }
+            }
+          } while (dirty && !closed);
+        } catch (e) { close(e); }
+        finally { checking = false; }
       };
       watcher.on("error", close);
       if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
@@ -224,6 +261,7 @@ export class Tasks {
     for (const task of this.tasks.values()) if (!finished(task) || (task.outcome && !task.notified)) this.launch(async () => {
       try {
         if (task.outcome && !task.pane) {
+          if (task.state === "cleanup_pending") await this.layout.serial.run(() => this.layout.compact(this.ownRefs(task)));
           if (!task.notified) task.notified = (await this.hooks.notify(task, false)) !== false;
           task.state = task.outcome.stopReason === "stop" ? "completed" : task.outcome.stopReason === "aborted" ? "cancelled" : "failed";
           await this.save(task); return;
@@ -267,6 +305,25 @@ export class Tasks {
   task(id: string) { const task = this.tasks.get(id); if (!task) throw new Error("Unknown taskId: " + id); return task; }
   async status(id: string) {
     const task = this.task(id);
+    if (task.state === "cleanup_pending" && task.outcome && task.notified) {
+      try {
+        await this.layout.serial.run(async () => {
+          if (task.pane) {
+            try { await this.layout.validate(task.pane); }
+            catch (e) { if (e instanceof HerdrError && e.code === "pane_not_found") { delete task.pane; await this.save(task); } else throw e; }
+          }
+          if (task.pane) await this.cleanup(task);
+          else {
+            await this.layout.compact(this.ownRefs(task));
+            task.state = task.cancelRequested || task.outcome!.stopReason === "aborted" ? "cancelled" : task.outcome!.stopReason === "stop" ? "completed" : "failed";
+            await this.save(task);
+          }
+        });
+      } catch (e) { task.diagnostic = diagnostic(e); await this.save(task); }
+    }
+    if (task.pane && !task.pane.agentName && !task.submitted && task.state !== "starting") {
+      try { await this.bind(task); } catch { /* A startup dialog can precede the package handshake. No control is safe yet. */ }
+    }
     if (task.pane?.agentName && !task.outcome) {
       try {
         const a = await this.layout.serial.run(() => this.layout.validate(task.pane!));
@@ -278,7 +335,10 @@ export class Tasks {
         } else if (a.agent_status === "unknown") {
           task.diagnostic = "Herdr state unknown; not evidence of completion."; await this.save(task);
         }
-        if (["idle", "done"].includes(String(a.agent_status)) && await this.receipt(task)) await this.finish(task);
+        if (["idle", "done"].includes(String(a.agent_status))) {
+          if (!task.submitted && !task.cancelRequested) this.launch(() => this.resumeStartup(task));
+          else if (await this.receipt(task)) await this.finish(task);
+        }
       } catch (e) {
         if (!this.alive) return view(task);
         if (e instanceof HerdrError && e.code === "pane_not_found") { delete task.pane; task.state = "failed"; }
@@ -292,12 +352,12 @@ export class Tasks {
   async wait(id: string, timeoutMs = 120000, signal?: AbortSignal) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new Error("timeoutMs must be 1..3600000.");
     const task = this.task(id);
-    if (finished(task) || ["blocked", "collection_failed", "cleanup_pending"].includes(task.state)) return { ...view(task), timedOut: false };
+    if (task.outcome || finished(task) || ["blocked", "collection_failed", "cleanup_pending"].includes(task.state)) return { ...view(task), timedOut: false };
     const until = Date.now() + timeoutMs;
     // Observer polls only local task state; it neither sends Herdr controls nor resubmits.
     await new Promise<void>((resolve, reject) => {
       const tick = () => {
-        if (finished(task) || ["blocked", "collection_failed", "cleanup_pending"].includes(task.state) || Date.now() >= until) { cleanup(); resolve(); }
+        if (task.outcome || finished(task) || ["blocked", "collection_failed", "cleanup_pending"].includes(task.state) || Date.now() >= until) { cleanup(); resolve(); }
       };
       const abort = () => { cleanup(); reject(new Error("Wait interrupted; child is still owned by the session.")); };
       const cleanup = () => { clearInterval(timer); signal?.removeEventListener("abort", abort); this.controller.signal.removeEventListener("abort", abort); };
@@ -305,7 +365,7 @@ export class Tasks {
       signal?.addEventListener("abort", abort, { once: true }); this.controller.signal.addEventListener("abort", abort, { once: true });
       if (signal?.aborted || !this.alive) abort(); else tick();
     });
-    return { ...view(task), timedOut: Date.now() >= until && !finished(task) };
+    return { ...view(task), timedOut: Date.now() >= until && !task.outcome && !finished(task) };
   }
   async cancel(id: string) {
     const task = this.task(id);

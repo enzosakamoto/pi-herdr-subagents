@@ -34,11 +34,19 @@ test("discriminated tool schemas validate all actions and reject malformed argum
   assert.equal(Value.Check(outputSchema, { tasks: [{ taskId: "id", state: "starting", agentName: "hs-test" }] }), true);
   assert.equal(Value.Check(outputSchema, { task: { taskId: "id", state: "unknown" } }), false);
 });
+test("skill examples conform to the implemented schema and retain independent/dependency/blocked guidance", async () => {
+  const source = await readFile("skills/pi-herdr-subagents/SKILL.md", "utf8");
+  const examples = source.split("\n").filter(line => line.startsWith("{") && line.endsWith("}"));
+  assert.equal(examples.length, 5);
+  for (const example of examples) assert.equal(Value.Check(parameters, JSON.parse(example)), true);
+  for (const phrase of ["Independent investigation", "Dependency", "Blocked child", "write ownership", "Do not answer approvals automatically", "resultPath", "hs-staging"]) assert.ok(source.includes(phrase), phrase);
+  assert.ok(!source.includes("planned interface") && !source.includes("not implemented yet"));
+});
 test("child marker never registers delegation, including through codemode", () => {
   const old = process.env.PI_HERDR_SUBAGENT;
   process.env.PI_HERDR_SUBAGENT = JSON.stringify({ taskId: "id", sessionId: "session", directory: "/tmp/test" });
   let tools = 0, hooks = 0;
   try { extension({ registerTool: () => { tools++; }, on: () => { hooks++; } } as unknown as ExtensionAPI); }
   finally { if (old === undefined) delete process.env.PI_HERDR_SUBAGENT; else process.env.PI_HERDR_SUBAGENT = old; }
-  assert.equal(tools, 0); assert.equal(hooks, 2);
+  assert.equal(tools, 0); assert.equal(hooks, 4);
 });

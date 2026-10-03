@@ -13,6 +13,7 @@ export class Fake implements Control {
   agents = new Map<string, { pane: string; task: Task; prompt?: string; resolve?: () => void }>();
   focus = "principal";
   zoomed = false;
+  startBlocked = false;
   delayStart: Promise<void> = Promise.resolve();
   error?: (args: string[]) => Error | undefined;
   constructor() {
@@ -56,6 +57,7 @@ export class Fake implements Control {
       this.tabs.set(tab, { pane: String(p.pane_id) }); return { root_pane: p };
     }
     if (group === "pane") {
+      if (action === "process-info") return { process_info: { shell_pid: 1, foreground_process_group_id: 1, foreground_processes: [{ pid: 1 }] } };
       if (action === "current" || action === "get") {
         const p = this.panes.get(action === "get" ? id : args.includes("--current") ? "principal" : opt("--pane"));
         if (!p) throw new HerdrError("Pane closed", "pane_not_found");
@@ -95,6 +97,7 @@ export class Fake implements Control {
         Object.assign(p, { agent: "pi", name: id, agent_status: "idle", agent_session: { kind: "path", value: sessionPath } });
         this.agents.set(id, { pane: String(p.pane_id), task });
         await atomicJson(join(task.directory, "ready.json"), { taskId: task.taskId, sessionId: task.sessionId, sessionPath, leafId: null });
+        if (this.startBlocked) { p.agent_status = "blocked"; throw new HerdrError("Approval needed", "agent_not_ready"); }
         return { agent: { ...p } };
       }
       const a = this.agents.get(id);

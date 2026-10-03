@@ -43,6 +43,8 @@ test("pi lifecycle: deferred follow-up admission gates closure; one-time usage a
   await eventually(() => sent.length === 1);
   assert.equal(fake.calls.filter(a => a[1] === "close").length, 0, "queued message is not delivery");
   assert.equal((await run({ action: "status", taskId: spawn.task.taskId })).task.state, "completed");
+  const waited = await run({ action: "wait", taskId: spawn.task.taskId, timeoutMs: 1 });
+  assert.equal(waited.task.timedOut, false, "persisted result resolves wait before follow-up admission/closure");
   const message = sent[0];
   session.appendCustomMessageEntry(String(message.customType), message.content as string, true, message.details);
   await handlers.get("message_end")!({ message: { role: "custom", ...message } }, ctx);
