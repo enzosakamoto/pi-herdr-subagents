@@ -4,7 +4,7 @@
 
 Subagents assíncronos do pi, executados de forma visível em panes do Herdr.
 
-> **Status: implementação planejada.** Este repositório contém a especificação, o plano de implementação e a skill de uso. Os exemplos abaixo definem a API pretendida; o código executável da extensão ainda não foi implementado.
+> **Status: checkpoint de layout aguardando autorização.** A inspeção somente leitura do Herdr 0.9.3 confirmou que o algoritmo BSP literal precisa de adaptação de topologia. [Evidências e proposta de tab temporária de staging](docs/superpowers/plans/2026-10-03-layout-checkpoint.md). Os exemplos abaixo continuam sendo a API pretendida; o código executável da extensão ainda não foi implementado.
 
 ## Funcionalidade
 

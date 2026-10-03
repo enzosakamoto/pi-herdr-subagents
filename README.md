@@ -4,7 +4,7 @@
 
 Asynchronous pi subagents, running visibly in Herdr terminal panes.
 
-> **Status: implementation planned.** This repository currently contains the specification, implementation plan and usage skill. The tool examples below define the intended API; executable extension code is not implemented yet.
+> **Status: layout checkpoint awaiting authorization.** Read-only inspection of Herdr 0.9.3 confirmed that the literal BSP algorithm needs a topology adaptation. [Evidence and proposed temporary staging tab](docs/superpowers/plans/2026-10-03-layout-checkpoint.md). The tool examples below remain the intended API; executable extension code is not implemented yet.
 
 ## What it does
 

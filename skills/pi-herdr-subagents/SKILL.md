@@ -8,7 +8,7 @@ compatibility: Requires pi, the pi-herdr-subagents extension, Herdr, HERDR_ENV=1
 
 ## Availability
 
-This skill describes the planned `herdr_subagent` contract. During bootstrap the tool may not exist yet. Check the actual available tool/schema before invoking it; if unavailable, explain that the extension must be implemented/loaded. Do not invent tool calls or silently replace delegation with raw pane automation.
+This skill describes the planned `herdr_subagent` contract. Implementation is awaiting authorization for a BSP topology adaptation recorded in `../../docs/superpowers/plans/2026-10-03-layout-checkpoint.md` (relative to this skill directory); the tool is not implemented yet. Check the actual available tool/schema before invoking it; if unavailable, explain that the extension must be implemented/loaded. Do not invent tool calls or silently replace delegation with raw pane automation.
 
 The main pi must run inside Herdr. The initial tab must contain only the principal; user-owned panes are not adopted or closed. Delegate only after the user authorizes delegation, including standing authorization for autonomous work. This package's agreed workflow permits autonomous delegation when that authorization is present.
 
