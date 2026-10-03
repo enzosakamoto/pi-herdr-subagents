@@ -87,3 +87,9 @@ Filas, delegação recursiva, catálogo de papéis, painel UI próprio, execuç�
 O usuário autorizou criar o repositório `pi-herdr-subagents` em `/Users/enzo/Documents/Development/pi-herdr-subagents`, mover esta especificação, gerar o plano e iniciar sua implementação em um novo Space Herdr, usando pi com modelo `openai-codex/gpt-6.1-sol` e raciocínio `high`.
 
 Distribuir como Pi package instalável via Git e caminho local, com manifesto `pi.extensions` e `pi.skills` em `package.json`. Incluir README em inglês, versão pt-BR e skill de uso da ferramenta. Não publicar no npm, criar remoto ou enviar commits sem solicitação. A skill `writing-plans` não está disponível localmente; o plano será escrito diretamente seguindo os critérios acima.
+
+## Adendo autorizado e implementação
+
+Após o checkpoint BSP, o usuário autorizou seguir e executar os testes necessários. A implementação preserva o layout final e os processos usando uma tab temporária de staging no mesmo workspace, exclusivamente durante mutações serializadas. Não usa layout.apply nem reinicia workers. O contexto inicial de integração v8 acima é histórico; a inspeção da implementação encontrou v9 já instalada e não alterou o arquivo gerenciado.
+
+O MVP e suas verificações/limitações reais estão documentados em [verificação](../plans/2026-10-03-verification.md). Os casos de crash, intervenção concorrente e fault injection não recebem garantias maiores que as efetivamente testadas.

@@ -2,126 +2,157 @@
 
 [English](README.md)
 
-Subagents assíncronos do pi, executados de forma visível em panes do Herdr.
+Subagents assíncronos do pi, executados visivelmente em panes do Herdr.
 
-> **Status: checkpoint de layout aguardando autorização.** A inspeção somente leitura do Herdr 0.9.3 confirmou que o algoritmo BSP literal precisa de adaptação de topologia. [Evidências e proposta de tab temporária de staging](docs/superpowers/plans/2026-10-03-layout-checkpoint.md). Os exemplos abaixo continuam sendo a API pretendida; o código executável da extensão ainda não foi implementado.
+**Status: MVP implementado, verificado com pi 1.0.0 e Herdr 0.9.3 (protocolo 22).**
+Repositório somente local: sem remoto, publicação npm ou instalação pessoal automática.
+Veja [cobertura e limitações da verificação](docs/superpowers/plans/2026-10-03-verification.md).
 
-## Funcionalidade
+## Comportamento
 
-O pi principal delega tarefas independentes a outros processos pi sem aguardar sua conclusão. Cada filho recebe sua própria conversa e pane. O principal continua trabalhando, pode consultar progresso, esperar quando existir uma dependência ou cancelar explicitamente um filho.
+O principal reserva uma tarefa e continua trabalhando enquanto um filho pi TUI inicia
+uma sessão nova. Filhos herdam modelo/raciocínio, recebem somente a tarefa/contexto
+fornecidos e não têm acesso à ferramenta de delegação deste package. A especialização
+opcional é acrescentada ao prompt de sistema.
 
-Os resultados concluídos são salvos e entregues ao principal antes de fechar os panes correspondentes. Agentes bloqueados e resultados que não puderem ser coletados com segurança permanecem visíveis para intervenção.
+- Máximo de seis filhos reservados/ativos; sem fila de capacidade nem recursão.
+- Mesmo cwd e tab final do principal.
+- Inicialmente a tab precisa conter apenas o principal, sem zoom.
+- Com 1–3 filhos: principal à esquerda 50%, uma coluna de filhos à direita 50%.
+- Com 4–6: principal 50%, duas colunas de 25%, até três linhas balanceadas por coluna.
+- Após concluir: persistir o resultado integral, entregá-lo como **follow-up**, fechar
+  somente o pane próprio correspondente e compactar sobreviventes.
+- Uma mensagem na fila do principal ocupado ainda não é entrega: o pane permanece
+  até o follow-up entrar efetivamente no transcript.
+- Bloqueios/coletas incertas conservam o pane. Nenhuma aprovação é enviada automaticamente.
 
-### Organização visual
+### Adaptação BSP autorizada
 
-```text
-┌──────────────────┬─────────┬─────────┐
-│                  │ Filho 1 │ Filho 4 │
-│                  ├─────────┼─────────┤
-│    Principal     │ Filho 2 │ Filho 5 │
-│                  ├─────────┼─────────┤
-│                  │ Filho 3 │ Filho 6 │
-└──────────────────┴─────────┴─────────┘
-        50%            25%       25%
-```
+O Herdr não reparenta um pane dentro da própria tab. Mudanças de layout usam uma tab
+temporária `hs-staging` **no mesmo workspace**, movendo os mesmos terminais vivos para
+fora e de volta com `--no-focus`. Sem `layout.apply`, recriação de terminal ou reinício
+de workers. O staging desaparece quando vazio. A geometria é transitória durante as
+mutações; geometria final, continuidade dos processos e foco principal/filho selecionado
+foram testados ao vivo. Um filho sobrevivente selecionado recupera o foco se o Herdr
+voltou ao principal; se o usuário selecionou outro pane/tab/workspace durante a operação,
+a extensão não toma esse novo foco.
 
-- Um a três filhos: uma coluna ocupando a metade direita.
-- Quatro a seis filhos: duas colunas dividindo a metade direita.
-- Até três filhos empilhados com alturas balanceadas por coluna; máximo de seis ativos.
-- Operações em segundo plano preservam o foco do usuário.
-- Após coletar, fechar panes próprios e compactar o layout.
-- Sem filhos, o principal recupera o espaço.
-- O MVP exige uma tab inicialmente contendo apenas o principal. Panes existentes do usuário não são adotados nem fechados.
+## Requisitos e instalação
 
-## Requisitos
+- pi com os contratos de extensão/ferramenta estruturada instalados (testado: 1.0.0).
+- Cliente/servidor Herdr compatíveis (testado: 0.9.3, protocolo 22).
+- Principal dentro do Herdr: `HERDR_ENV=1` e contexto de pane gerenciado.
+- Integração pi de ciclo de vida funcional; testada com v9. Consulte
+  `herdr integration status`. Instalação/atualização é separada; este package nunca
+  altera `herdr-agent-state.ts` nem configurações pessoais.
+- Credenciais de modelo utilizáveis pelos filhos. Conversas são isoladas; **arquivos,
+  credenciais e permissões do sistema não são**. Separe responsabilidades de escrita.
 
-- pi com suporte a extensões TypeScript e Pi packages. O desenvolvimento considera pi 1.0.0.
-- Herdr instalado e em execução; o desenvolvimento considera Herdr 0.9.3. As capacidades necessárias para o layout precisam ser verificadas durante a implementação.
-- Executar o principal dentro de um pane gerenciado pelo Herdr (`HERDR_ENV=1`).
-- Integração pi do Herdr instalada para o mesmo usuário/diretório de agente:
-
-  ```bash
-  herdr integration install pi
-  ```
-
-- Credenciais válidas para os modelos do pi. Os filhos herdam o modelo e o nível de raciocínio do principal.
-
-Instalar o package não instala o Herdr, não concede confiança ao projeto e não atualiza automaticamente a integração do Herdr.
-
-## Instalação
-
-**Estes comandos passam a funcionar após implementar a extensão e o manifesto do package.** Nenhum repositório remoto foi criado ainda.
-
-Checkout local:
-
-```bash
-pi install /caminho/absoluto/pi-herdr-subagents
-```
-
-Depois de publicar seu repositório Git, substitua `OWNER`:
-
-```bash
-pi install git:github.com/OWNER/pi-herdr-subagents
-# Opcional: fixar uma tag publicada.
-pi install git:github.com/OWNER/pi-herdr-subagents@v0.1.0
-```
-
-Execute `/reload` após instalar. Para experimentar sem adicionar o package às configurações pessoais:
+Experimente sem gravar configurações pessoais:
 
 ```bash
 pi -e /caminho/absoluto/pi-herdr-subagents
 ```
 
-Gerencie packages com `pi list`, `pi update --extensions` e `pi remove <source>`.
+Para instalar deliberadamente:
 
-## Como usar
-
-Peça ao principal em linguagem natural:
-
-> Investigue o fluxo de autenticação em um agente filho enquanto você trabalha na API. Não altere os mesmos arquivos. Incorpore os achados quando estiverem prontos.
-
-Ou carregue explicitamente a skill distribuída no package:
-
-```text
-/skill:pi-herdr-subagents investigue o fluxo de autenticação em paralelo
+```bash
+pi install /caminho/absoluto/pi-herdr-subagents
+# Depois execute /reload no pi.
 ```
 
-### Ferramenta planejada: `herdr_subagent`
+Após criar seu próprio remoto (aqui ainda não existe), a instalação Git é
+`pi install git:github.com/OWNER/pi-herdr-subagents`; substitua OWNER por um repositório real.
+O package não escolhe licença/publicação npm pelo usuário.
 
-Os exemplos são argumentos de chamadas de ferramenta pelo modelo, não comandos de shell:
+## Ferramenta: herdr_subagent
 
-```json
-{"action":"spawn","task":"Mapeie o fluxo de autenticação. Informe arquivos relevantes e riscos, sem alterar código.","instructions":"Você é um investigador de código focado."}
-```
-
-A delegação retorna um identificador imediatamente, antes de terminar o trabalho do modelo. Use o ID retornado, sem adivinhar IDs ou nomes de panes:
+Argumentos são chamadas de ferramenta pelo modelo, não comandos de shell:
 
 ```json
+{"action":"spawn","task":"Mapeie as entradas de autenticação. Não altere arquivos. Retorne caminhos relevantes e riscos.","instructions":"Atue como investigador de código focado."}
 {"action":"list"}
 {"action":"status","taskId":"ID_RETORNADO"}
 {"action":"wait","taskId":"ID_RETORNADO","timeoutMs":120000}
 {"action":"cancel","taskId":"ID_RETORNADO"}
 ```
 
-Resultados continuam consultáveis após fechar os panes. Mensagens de conclusão entram como follow-ups, sem interromper o trabalho atual.
+`spawn` retorna após a reserva persistida, antes do startup/modelo; a resposta inicial
+pode ainda não ter paneId. Use o taskId retornado. `instructions` é opcional.
+`wait` usa 120000 ms por padrão; intervalo permitido: 1–3600000. Timeout/interrupção
+do observador não cancela o filho, não comprova falha de entrega e não reenvia o prompt.
 
-## Limites operacionais
+Respostas incluem `content` legível, `details` e `structuredContent` com schema.
+Estados: `starting`, `working`, `blocked`, `collecting`, `completed`, `failed`,
+`cancelled`, `collection_failed`, `cleanup_pending`.
+Resultados trazem texto limitado a 12000 caracteres, stop reason, uso, diagnóstico
+e `resultPath` para o JSON integral. Permanecem consultáveis após fechar o pane.
+`list` é local; `status` reconcilia identidade e pode concluir coleta, iniciar uma
+tarefa **nunca enviada** após resolver bloqueio de startup ou retentar limpeza pendente.
 
-- O sétimo filho ativo é recusado; não há fila nem delegação recursiva.
-- Interromper o turno do principal não cancela automaticamente filhos independentes.
-- Timeout de espera não cancela um filho e não comprova que o prompt não foi entregue.
-- Bloqueios de aprovação/pergunta exigem intervenção humana deliberada; nunca aprovar automaticamente.
-- `idle`/`done` indicam disponibilidade, não necessariamente sucesso. `unknown` não é conclusão.
-- Reload/shutdown libera observadores locais, não encerra filhos ativos. Retomadas reconciliam identidade antes de controlar panes.
-- Fechar somente panes criados pela extensão cujos resultados correspondentes tenham sido persistidos com segurança.
-- Panes isolam conversas, **não arquivos, credenciais ou permissões do sistema**. Defina responsabilidades de escrita sem sobreposição. Worktrees e sandbox não fazem parte deste MVP.
+Cancelamento explícito envia Escape ao pi e aguarda quiescência. Busy/unknown após
+cancelamento não permite fechar como se fosse seguro. `idle`/`done` sozinho não é sucesso.
 
-## Desenvolvimento
+Carregue a orientação distribuída com `/skill:pi-herdr-subagents`.
 
-- [Especificação](docs/superpowers/specs/2026-10-03-herdr-subagents-design.md).
-- [Plano de implementação](docs/superpowers/plans/2026-10-03-herdr-subagents-plan.md).
-- [Skill de uso](skills/pi-herdr-subagents/SKILL.md).
+## Persistência e recuperação
 
-A implementação adicionará `package.json`, manifesto `pi.extensions`/`pi.skills`, código e testes automatizados. As verificações planejadas são `npm test`, `npm run check`, carregamento do package e teste real de layout em ambiente isolado. Ainda não estão disponíveis nem foram aprovadas por execução.
+O estado fica em custom entries do ramo ativo do principal e em arquivos privados sob
+`<diretório-do-pi>/herdr-subagents/<session-id-do-principal>/`. Sessões dos filhos e
+`result.json` integrais ficam fora do repositório. O filho registra caminho de sessão
+e leaf ativo autoritativos em `agent_settled`; a coleta segue esse ramo e correlaciona
+a mensagem única da tarefa. A tela do terminal é diagnóstico, nunca prova de resposta integral.
 
-Um ponto fundamental é preservar filhos ativos ao reorganizar o layout BSP do Herdr. Não recrie terminais em execução usando `layout.apply`; verifique operações suportadas de movimentação/divisão antes de prometer compactação arbitrária.
+Shutdown/reload encerra observadores locais, não filhos. Retomar valida terminal, nome
+e sessão antes de controlar; nunca inicia outro worker nem repete um prompt já tentado.
+Startup interrompido antes do handshake exige intervenção. Panes movidos/substituídos
+são recusados, não adotados. Forks/históricos copiados não adotam tarefas de outra sessão
+principal; consulte as referências persistidas ou retome a original. Use apenas um
+principal por sessão pi. Perdas de panes são diagnosticadas na reconciliação do ciclo
+de vida, em `status` ou na retomada; não há polling remoto perpétuo.
+
+Follow-ups são deduplicados pelas mensagens persistidas no ramo e tags de tarefa;
+conteúdo duplicado/obsoleto da fila é filtrado do contexto do modelo. Crash abrupto ou
+mudança de ramo pode deixar uma mensagem enfileirada sem confirmação; resultados
+persistidos são recuperados, não descartados. Uso dos filhos entra uma vez no **próximo
+resultado de ferramenta do principal** (a ExtensionAPI pública não oferece appendUsage).
+Totais podem atrasar até essa chamada. Buckets de provider/modelo são preservados quando
+conhecidos; uso aninhado sem atribuição é marcado explicitamente como unknown.
+
+Falha de fechamento/layout conserva resultado e registro cleanup_pending. `status` ou
+retomada pode reconciliar sobreviventes próprios. Nunca recuperar matando/reiniciando
+workers ou fechando panes do usuário. Não dispute controle bruto com a extensão.
+
+## Verificação
+
+Desenvolvimento exige Node 24+ (testes TypeScript nativos) e npm:
+
+```bash
+npm ci
+npm test
+npm run check
+git diff --check
+```
+
+Trinta e cinco testes determinísticos incluem as 720 ordens de remoção, observadores independentes,
+capacidade, bloqueios/startup/cancelamento, ramos, respostas integrais, confirmação do
+follow-up, contabilidade única, discovery de recursos e schemas.
+
+Testes reais são opt-in e exigem **servidor de teste isolado e nomeado já em execução**.
+Não iniciam/param/atualizam servidor nem usam as tabs de implementação/referência:
+
+```bash
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live-tasks
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live-extension
+```
+
+Os dois últimos fazem chamadas de modelo. Os testes criam/limpam somente workspaces
+próprios; falhas conservam panes/evidências para diagnóstico. Passaram layout real,
+dois filhos TUI, cancelamento explícito por Escape e um principal real recebendo follow-ups/contabilidade. Bordas de
+reload/ramo/bloqueio têm cobertura determinística; não se afirma cobertura
+exaustiva de injeção de falhas ao vivo.
+
+[Especificação](docs/superpowers/specs/2026-10-03-herdr-subagents-design.md) ·
+[Plano](docs/superpowers/plans/2026-10-03-herdr-subagents-plan.md) ·
+[Checkpoint BSP histórico](docs/superpowers/plans/2026-10-03-layout-checkpoint.md)

@@ -1,5 +1,9 @@
 # Implementation plan — pi-herdr-subagents
 
+## Implementation status
+
+The MVP is implemented and verified. The approved follow-up authorized temporary same-workspace staging and isolated live tests. See [the verification report](2026-10-03-verification.md) for actual checks, failures corrected and remaining limitations. The plan below retains the original baseline; its documentation-only/pending language is historical.
+
 ## Authority and scope
 
 The user approved autonomous asynchronous delegation, the layout and automatic pane closure, and explicitly requested this Git repository, bilingual READMEs, a usage skill and implementation by a new pi in a new Herdr Space. Implement the spec at `../specs/2026-10-03-herdr-subagents-design.md`. Do not restart brainstorming or ask again about decisions already recorded. Surface genuine protocol constraints rather than silently relaxing requirements.

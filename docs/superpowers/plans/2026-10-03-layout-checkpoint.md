@@ -2,6 +2,8 @@
 
 ## Status
 
+**Registro histórico: checkpoint superado.** Após este registro, o usuário autorizou seguir e fazer os testes necessários. O staging no mesmo workspace foi implementado e validado em sessão isolada; veja [verificação e limitações](2026-10-03-verification.md). As pendências descritas abaixo retratam o estado no momento do checkpoint, não o estado atual do package.
+
 Inspeção somente leitura concluída em 2026-10-03. A implementação do controlador de layout aguarda autorização de uma adaptação de topologia. Este registro não substitui o desenho aprovado nem afirma que a extensão esteja implementada.
 
 ## Ambiente e evidências
