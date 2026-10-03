@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { type Control, HerdrError, object } from "./herdr.ts";
 import { Layout, type PaneRef } from "./layout.ts";
 import { atomicJson, collect, readJson, zeroUsage, type Receipt, type Outcome } from "./results.ts";
@@ -37,7 +37,7 @@ export class Tasks {
   readonly defaults: Defaults;
   readonly hooks: Hooks;
   constructor(cli: Control, principal: PaneRef, root: string, defaults: Defaults, hooks: Hooks) {
-    this.root = root; this.defaults = defaults; this.hooks = hooks;
+    this.root = resolve(root); this.defaults = defaults; this.hooks = hooks;
     this.cli = {
       json: (args, signal, timeout) => cli.json(args, signal ?? this.controller.signal, timeout),
       text: (args, signal, timeout) => cli.text(args, signal ?? this.controller.signal, timeout)
@@ -255,6 +255,9 @@ export class Tasks {
   }
   async restore(records: Task[]) {
     for (const record of records) {
+      // Forked/copied history must not adopt another principal session\'s workers.
+      if (typeof record.directory !== "string" || typeof record.taskId !== "string" ||
+          dirname(record.directory) !== this.root || basename(record.directory) !== record.taskId) continue;
       let task = structuredClone(record);
       try { const disk = await readJson<Task>(join(task.directory, "task.json"));
         if (disk.taskId === task.taskId && disk.sessionId === task.sessionId && disk.directory === task.directory) task = { ...disk, notified: record.notified, attentionSent: record.attentionSent };

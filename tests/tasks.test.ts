@@ -123,6 +123,18 @@ test("shutdown/resume observes existing child without launching/submitting again
   assert.equal(fake.calls.filter(a => a[1] === "prompt").length, 1);
   assert.equal(notifications.filter(n => !n.attention).length, 1);
 });
+test("copied history from another principal session never adopts its live children", async t => {
+  const { fake, manager, root, records } = await setup(t), task = await manager.spawn("work");
+  await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
+  const calls = fake.calls.length;
+  const foreign = new Tasks(fake, paneRef(fake.panes.get("principal")), join(root, "another-principal"), manager.defaults,
+    { persist: async () => { throw new Error("foreign state write"); }, notify: async () => { throw new Error("foreign notification"); } });
+  t.after(() => foreign.stop());
+  await foreign.restore([records.filter(r => r.taskId === task.taskId).at(-1)!]);
+  assert.deepEqual(foreign.list(), []);
+  assert.equal(fake.calls.length, calls);
+  assert.ok(fake.panes.has(fake.agents.get(task.agentName)!.pane));
+});
 test("unknown is not completion, even with a settlement file", async t => {
   const { fake, manager } = await setup(t), task = await manager.spawn("work");
   await eventually(() => !!fake.agents.get(task.agentName)?.prompt);
