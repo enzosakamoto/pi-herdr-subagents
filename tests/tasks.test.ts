@@ -33,6 +33,20 @@ test("spawn returns before delayed startup; reservation enforces six concurrent 
   await eventually(() => [...manager.tasks.values()].every(task => task.submitted));
   assert.equal(fake.agents.size, 6);
 });
+test("model/thinking are captured at reservation, not read from a later principal selection", async t => {
+  const { fake, manager } = await setup(t);
+  manager.defaults.model = "first/model"; manager.defaults.thinking = "high";
+  const first = manager.spawn("A");
+  manager.defaults.model = "second/model"; manager.defaults.thinking = "low";
+  const second = manager.spawn("B");
+  const [a, b] = await Promise.all([first, second]);
+  await eventually(() => !!fake.agents.get(a.agentName)?.prompt && !!fake.agents.get(b.agentName)?.prompt);
+  for (const [task, model, thinking] of [[a, "first/model", "high"], [b, "second/model", "low"]] as const) {
+    const args = fake.calls.find(args => args[1] === "start" && args[2] === task.agentName)!;
+    assert.equal(args[args.indexOf("--model") + 1], model);
+    assert.equal(args[args.indexOf("--thinking") + 1], thinking);
+  }
+});
 test("two children work concurrently, persist before close and notify exactly once", async t => {
   const { fake, manager, notifications } = await setup(t);
   const tasks = await Promise.all([manager.spawn("investigate A"), manager.spawn("investigate B")]);

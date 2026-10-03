@@ -9,6 +9,7 @@ export type State = "starting" | "working" | "blocked" | "collecting" | "complet
 export interface Task {
   taskId: string; task: string; instructions?: string; state: State; created: string;
   agentName: string; sessionId: string; directory: string; pane?: PaneRef;
+  model?: string; thinking?: string;
   submitted: boolean; cancelRequested: boolean; diagnostic?: string; outcome?: Outcome; resultPath?: string;
   attentionSent?: boolean; notified?: boolean;
 }
@@ -62,6 +63,7 @@ export class Tasks {
     const id = crypto.randomUUID();
     const task: Task = { taskId: id, task: taskText, instructions, state: "starting", created: new Date().toISOString(),
       agentName: "hs-" + id.replaceAll("-", "").slice(0, 24), sessionId: "hs-" + id, directory: join(this.root, id),
+      model: this.defaults.model, thinking: this.defaults.thinking,
       submitted: false, cancelRequested: false };
     this.tasks.set(id, task); // Synchronous reservation precedes the first await.
     try { await this.save(task); } catch (e) { this.tasks.delete(id); throw e; }
@@ -88,7 +90,7 @@ export class Tasks {
         });
         const args = ["agent", "start", task.agentName, "--kind", "pi", "--pane", task.pane!.paneId, "--timeout", "30000", "--",
           "--session-id", task.sessionId, "--session-dir", join(task.directory, "sessions"),
-          "--model", this.defaults.model, "--thinking", this.defaults.thinking, "-e", this.defaults.packagePath];
+          "--model", task.model ?? this.defaults.model, "--thinking", task.thinking ?? this.defaults.thinking, "-e", this.defaults.packagePath];
         if (task.instructions) {
           const path = join(task.directory, "instructions.txt");
           const { writeFile } = await import("node:fs/promises");
