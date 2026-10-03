@@ -29,6 +29,7 @@ export class Layout {
       throw new Error("Pane moved or replaced; refusing control: " + ref.paneId);
     if (ref.agentName) {
       const a = object((await this.cli.json(["agent", "get", ref.agentName])).agent, "agent");
+      if (!a.agent_session) throw new Error("Missing Herdr pi session reporting. Check herdr integration status; install/update the pi integration separately with consent. Pane retained.");
       const session = object(a.agent_session, "agent_session");
       if (a.pane_id !== ref.paneId || a.terminal_id !== ref.terminalId || a.name !== ref.agentName || a.agent !== "pi" ||
           !((session.kind === "path" && session.value === ref.sessionPath) || (session.kind === "id" && session.value === ref.sessionId)))

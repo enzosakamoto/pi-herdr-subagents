@@ -69,6 +69,7 @@ export class Tasks {
     return structuredClone(task);
   }
   private async attention(task: Task) {
+    if (!this.alive) return;
     if (!task.attentionSent) {
       await this.hooks.notify(structuredClone(task), true);
       task.attentionSent = true; await this.save(task);
@@ -225,7 +226,7 @@ export class Tasks {
       try {
         const receipt = await this.receipt(task);
         if (!receipt || receipt.sessionPath !== task.pane.sessionPath) throw new Error("Settlement/session identity mismatch.");
-        const outcome = await collect(receipt, task.taskId, task.sessionId);
+        const outcome = await collect(receipt, task.taskId, task.sessionId, task.cancelRequested);
         const resultPath = join(task.directory, "result.json");
         await atomicJson(resultPath, outcome); // Save complete result before any notification/closure.
         task.outcome = outcome; task.resultPath = resultPath;
@@ -246,7 +247,7 @@ export class Tasks {
     const ref = task.pane;
     const a = await this.layout.validate(ref);
     if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Cannot close non-quiescent child.");
-    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; await this.save(task); });
+    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; task.state = "collecting"; await this.save(task); });
     task.state = task.cancelRequested || task.outcome.stopReason === "aborted" ? "cancelled" : task.outcome.stopReason === "stop" ? "completed" : "failed";
     await this.save(task);
   }
@@ -261,7 +262,7 @@ export class Tasks {
     for (const task of this.tasks.values()) if (!finished(task) || (task.outcome && !task.notified)) this.launch(async () => {
       try {
         if (task.outcome && !task.pane) {
-          if (task.state === "cleanup_pending") await this.layout.serial.run(() => this.layout.compact(this.ownRefs(task)));
+          if (task.state === "cleanup_pending" || task.state === "collecting") await this.layout.serial.run(() => this.layout.compact(this.ownRefs(task)));
           if (!task.notified) task.notified = (await this.hooks.notify(task, false)) !== false;
           task.state = task.outcome.stopReason === "stop" ? "completed" : task.outcome.stopReason === "aborted" ? "cancelled" : "failed";
           await this.save(task); return;
@@ -308,6 +309,7 @@ export class Tasks {
     if (task.state === "cleanup_pending" && task.outcome && task.notified) {
       try {
         await this.layout.serial.run(async () => {
+          if (task.state !== "cleanup_pending") return;
           if (task.pane) {
             try { await this.layout.validate(task.pane); }
             catch (e) { if (e instanceof HerdrError && e.code === "pane_not_found") { delete task.pane; await this.save(task); } else throw e; }
@@ -376,7 +378,7 @@ export class Tasks {
     await this.layout.serial.run(async () => {
       const a = await this.layout.validate(task.pane!);
       if (["working", "blocked", "unknown"].includes(String(a.agent_status))) {
-        await this.cli.json(["agent", "send-keys", task.agentName, "esc"]);
+        await this.cli.text(["agent", "send-keys", task.agentName, "esc"]);
         try { await this.cli.json(["agent", "wait", task.agentName, "--timeout", "15000"], undefined, 20000); }
         catch (e) { task.diagnostic = "Cancellation not confirmed; pane retained. " + diagnostic(e); await this.save(task); }
       }

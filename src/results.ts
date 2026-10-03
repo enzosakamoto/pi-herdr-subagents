@@ -1,7 +1,7 @@
 import { readFile, mkdir, open, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SessionManager, type FileEntry } from "@earendil-works/pi-coding-agent";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 
 export interface Receipt { taskId: string; sessionId: string; sessionPath: string; leafId: string | null }
 export interface Outcome {
@@ -29,7 +29,7 @@ export async function atomicJson(path: string, data: unknown) {
 }
 export async function readJson<T>(path: string): Promise<T> { return JSON.parse(await readFile(path, "utf8")) as T; }
 
-export async function collect(receipt: Receipt, taskId: string, sessionId: string): Promise<Outcome> {
+export async function collect(receipt: Receipt, taskId: string, sessionId: string, explicitlyCancelled = false): Promise<Outcome> {
   if (receipt.taskId !== taskId || receipt.sessionId !== sessionId || !receipt.leafId) throw new Error("Mismatched settlement receipt.");
   const raw = await readFile(receipt.sessionPath, "utf8");
   // A concurrent/partial last line is never a finalized entry.
@@ -47,8 +47,15 @@ export async function collect(receipt: Receipt, taskId: string, sessionId: strin
   if (work.some(e => e.type === "message" && e.message.role === "user")) throw new Error("Additional user turn; task completion is ambiguous.");
   const assistants = work.filter(e => e.type === "message" && e.message.role === "assistant");
   const last = assistants.at(-1);
-  if (!last || last.type !== "message" || last.message.role !== "assistant") throw new Error("No finalized assistant response for this task.");
-  const response = last.message;
+  let response: AssistantMessage | undefined = last?.type === "message" && last.message.role === "assistant" ? last.message : undefined;
+  if (explicitlyCancelled && (!response || response.stopReason === "toolUse")) {
+    // The correlated settlement + separately verified idle state prove interruption,
+    // even when Escape stopped the turn before any final assistant response existed.
+    // This is a cancellation diagnostic, never an older assistant's successful answer.
+    response = { role: "assistant", content: [{ type: "text", text: "Task explicitly cancelled; no final assistant response was produced." }],
+      api: "interrupted", provider: "unknown", model: "interrupted", stopReason: "aborted", usage: zeroUsage(), timestamp: Date.now() };
+  }
+  if (!response) throw new Error("No finalized assistant response for this task.");
   if (!["stop", "length", "error", "aborted"].includes(response.stopReason) || response.content.some(c => c.type === "toolCall"))
     throw new Error("Last assistant message is not a final task response.");
   const text = response.content.filter(c => c.type === "text").map(c => c.text).join("\n");

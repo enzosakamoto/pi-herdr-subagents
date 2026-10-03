@@ -40,6 +40,14 @@ test("missing correlation, missing final, tool-only and additional user turn ref
     [user, entry("other", "u", { role: "user", content: "unrelated turn", timestamp: Date.now() }), entry("a", "other", assistant("another task"))]
   ]) await assert.rejects(collect(await fixture(t, entries), taskId, sessionId));
 });
+test("explicit interrupted task with no final assistant yields diagnostics, never invented success", async t => {
+  const receipt = await fixture(t, [user], "u");
+  await assert.rejects(collect(receipt, taskId, sessionId), /No finalized/);
+  const result = await collect(receipt, taskId, sessionId, true);
+  assert.equal(result.stopReason, "aborted");
+  assert.equal(result.usage.totalTokens, 0);
+  assert.match(result.text, /explicitly cancelled/);
+});
 test("receipt and session mismatches are rejected", async t => {
   const receipt = await fixture(t, [user, entry("a", "u", assistant("result"))]);
   await assert.rejects(collect({ ...receipt, taskId: "other" }, taskId, sessionId), /Mismatched/);

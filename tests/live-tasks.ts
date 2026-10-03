@@ -26,7 +26,7 @@ try {
   console.log("Spawn reservations returned in", Date.now() - started, "ms; principal remains free.");
   let overlap = false;
   const deadline = Date.now() + 180000;
-  while (Date.now() < deadline && !tasks.every(task => finished(manager.task(task.taskId)))) {
+  while (Date.now() < deadline && (!tasks.every(task => finished(manager.task(task.taskId))) || manager.pending.size > 0)) {
     const current = tasks.map(task => manager.task(task.taskId));
     if (current.every(task => task.state === "working" && task.pane)) overlap = true;
     const failure = current.find(task => ["blocked", "collection_failed", "cleanup_pending", "failed"].includes(task.state));
@@ -40,6 +40,14 @@ try {
     assert.equal(current.outcome?.text.trim(), index === 0 ? "HS-LIVE-A" : "HS-LIVE-B");
     assert.ok(current.resultPath); assert.equal(current.pane, undefined);
   }
+  const cancelled = await manager.spawn("Cancellation verification. Do not read or modify project files. Use bash to run sleep 30, then say SHOULD-NOT-COMPLETE.");
+  while (!manager.task(cancelled.taskId).submitted && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+  await manager.cancel(cancelled.taskId);
+  while ((!finished(manager.task(cancelled.taskId)) || manager.pending.size > 0) && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+  assert.ok(finished(manager.task(cancelled.taskId)));
+  assert.equal(manager.task(cancelled.taskId).state, "cancelled");
+  assert.equal(manager.task(cancelled.taskId).outcome?.stopReason, "aborted");
+  console.log("Live explicit Escape cancellation PASS; correlated diagnostics persisted before cleanup.");
   success = true;
   console.log("Live pi lifecycle PASS: two TUI children, one prompt each, overlap, structured persisted results, owned pane cleanup.");
 } finally {

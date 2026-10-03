@@ -166,7 +166,7 @@ test("manual closure is diagnosed; a closed pane is not a live task target", asy
 test("compaction failure preserves results and marks cleanup pending, status reconciles survivors", async t => {
   const { fake, manager } = await setup(t);
   const [a, b] = await Promise.all([manager.spawn("A"), manager.spawn("B")]);
-  await eventually(() => !!fake.agents.get(b.agentName)?.prompt);
+  await eventually(() => !!fake.agents.get(a.agentName)?.prompt && !!fake.agents.get(b.agentName)?.prompt);
   fake.error = args => args[1] === "move" ? new HerdrError("layout mutation timeout", "cli_timeout", true) : undefined;
   await fake.complete(a.agentName);
   await eventually(() => manager.task(a.taskId).state === "cleanup_pending");

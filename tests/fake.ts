@@ -125,7 +125,10 @@ export class Fake implements Control {
     }
     throw new Error("Unsupported fake command: " + args.join(" "));
   }
-  async text(args: string[]) { this.calls.push(args); return "bounded terminal diagnostic"; }
+  async text(args: string[]) {
+    if (args[0] === "agent" && args[1] === "send-keys") { await this.json(args); return ""; }
+    this.calls.push(args); return "bounded terminal diagnostic";
+  }
   async complete(name: string, stopReason = "stop", text = "result") {
     const a = this.agents.get(name)!;
     const p = this.panes.get(a.pane)!;
