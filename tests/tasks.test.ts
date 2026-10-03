@@ -47,6 +47,21 @@ test("model/thinking are captured at reservation, not read from a later principa
     assert.equal(args[args.indexOf("--thinking") + 1], thinking);
   }
 });
+test("per-call model selections are copied before await and never mutate shared defaults", async t => {
+  const { fake, manager } = await setup(t);
+  const options = { model: "p/cheap", tier: "low" as const, modelSource: "tier" as const, thinking: "low" };
+  const pending = manager.spawn("tests", undefined, options);
+  options.model = "p/mutated"; options.thinking = "high";
+  const defaultPending = manager.spawn("legacy defaults");
+  const [a, b] = await Promise.all([pending, defaultPending]);
+  assert.equal(a.model, "p/cheap"); assert.equal(a.thinking, "low");
+  assert.equal(b.model, "test/test"); assert.equal(b.thinking, "off");
+  assert.equal(manager.defaults.model, "test/test");
+  await eventually(() => !!fake.agents.get(a.agentName)?.prompt && !!fake.agents.get(b.agentName)?.prompt);
+  const args = fake.calls.find(args => args[1] === "start" && args[2] === a.agentName)!;
+  assert.equal(args[args.indexOf("--model") + 1], "p/cheap");
+});
+
 test("two children work concurrently, persist before close and notify exactly once", async t => {
   const { fake, manager, notifications } = await setup(t);
   const tasks = await Promise.all([manager.spawn("investigate A"), manager.spawn("investigate B")]);
@@ -116,7 +131,14 @@ test("shutdown/resume observes existing child without launching/submitting again
     persist: async record => { records.push(record); }, notify: async (record, attention) => { notifications.push({ id: record.taskId, attention }); }
   });
   t.after(() => restored.stop());
-  await restored.restore([records.filter(r => r.taskId === task.taskId).at(-1)!]);
+  const legacy = structuredClone(records.filter(r => r.taskId === task.taskId).at(-1)!);
+  delete legacy.tier; delete legacy.modelSource; delete legacy.model; delete legacy.thinking;
+  await atomicJson(join(legacy.directory, "task.json"), legacy);
+  await restored.restore([legacy]);
+  assert.equal(restored.list()[0].model, undefined, "legacy metadata is not invented on restore");
+  assert.equal(restored.list()[0].tier, undefined);
+  assert.equal(restored.list()[0].modelSource, undefined);
+  assert.equal(restored.list()[0].thinking, undefined);
   await fake.complete(task.agentName);
   await eventually(() => finished(restored.task(task.taskId)) && restored.pending.size === 0);
   assert.equal(fake.calls.filter(a => a[1] === "start").length, 1);
@@ -157,6 +179,30 @@ test("only explicit pre-launch busy rejection is retried, never an uncertain lau
   assert.equal(fake.calls.filter(a => a[1] === "start").length, 3);
   assert.equal(fake.agents.size, 1);
 });
+test("mismatched or unreported startup models never receive the task or silently resume", async t => {
+  for (const startupModel of ["other/expensive", null]) {
+    const { fake, manager } = await setup(t);
+    fake.startupModel = startupModel;
+    const task = await manager.spawn("run tests", undefined, { model: "test/cheap", tier: "low", modelSource: "tier", thinking: "off" });
+    await eventually(() => !!manager.task(task.taskId).attentionSent);
+    assert.match(manager.task(task.taskId).diagnostic!, /Child model mismatch/);
+    assert.equal(manager.task(task.taskId).submitted, false);
+    assert.equal(manager.task(task.taskId).state, "collection_failed");
+    const status = await manager.status(task.taskId);
+    await eventually(() => manager.pending.size === 0);
+    assert.equal(status.model, "test/cheap"); assert.equal(status.modelSource, "tier");
+    assert.equal(manager.task(task.taskId).submitted, false);
+    assert.equal(fake.calls.filter(args => args[1] === "prompt").length, 0);
+    assert.equal(fake.calls.filter(args => args[1] === "start").length, 1);
+    assert.equal(fake.calls.filter(args => args[1] === "close").length, 0);
+    const args = fake.calls.find(args => args[1] === "start")!;
+    assert.equal(args[args.indexOf("--provider") + 1], "test");
+    await manager.cancel(task.taskId);
+    await eventually(() => finished(manager.task(task.taskId)));
+    assert.equal(manager.task(task.taskId).state, "cancelled");
+  }
+});
+
 test("blocked startup never auto-approves/relaunches; status resumes one unsent task after intervention", async t => {
   const { fake, manager } = await setup(t); fake.startBlocked = true;
   const task = await manager.spawn("work");

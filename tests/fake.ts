@@ -14,6 +14,7 @@ export class Fake implements Control {
   focus = "principal";
   zoomed = false;
   startBlocked = false;
+  startupModel?: string | null;
   delayStart: Promise<void> = Promise.resolve();
   error?: (args: string[]) => Error | undefined;
   constructor() {
@@ -96,7 +97,8 @@ export class Fake implements Control {
         const sessionPath = join(task.directory, "sessions", "child.jsonl");
         Object.assign(p, { agent: "pi", name: id, agent_status: "idle", agent_session: { kind: "path", value: sessionPath } });
         this.agents.set(id, { pane: String(p.pane_id), task });
-        await atomicJson(join(task.directory, "ready.json"), { taskId: task.taskId, sessionId: task.sessionId, sessionPath, leafId: null });
+        await atomicJson(join(task.directory, "ready.json"), { taskId: task.taskId, sessionId: task.sessionId, sessionPath, leafId: null,
+          model: this.startupModel === undefined ? task.model : this.startupModel ?? undefined });
         if (this.startBlocked) { p.agent_status = "blocked"; throw new HerdrError("Approval needed", "agent_not_ready"); }
         return { agent: { ...p } };
       }

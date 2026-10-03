@@ -4,12 +4,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { type Control, HerdrError, object } from "./herdr.ts";
 import { Layout, type PaneRef } from "./layout.ts";
 import { atomicJson, collect, readJson, zeroUsage, type Receipt, type Outcome } from "./results.ts";
+import { splitModelId, type ModelSelection, type ModelSource, type Tier } from "./config.ts";
 
 export type State = "starting" | "working" | "blocked" | "collecting" | "completed" | "failed" | "cancelled" | "collection_failed" | "cleanup_pending";
 export interface Task {
   taskId: string; task: string; instructions?: string; state: State; created: string;
   agentName: string; sessionId: string; directory: string; pane?: PaneRef;
-  model?: string; thinking?: string;
+  model?: string; thinking?: string; tier?: Tier; modelSource?: ModelSource;
   submitted: boolean; cancelRequested: boolean; diagnostic?: string; outcome?: Outcome; resultPath?: string;
   attentionSent?: boolean; notified?: boolean;
 }
@@ -19,9 +20,11 @@ export interface Hooks {
   notify(task: Task, attention: boolean): Promise<boolean | void>;
 }
 export interface Defaults { cwd: string; model: string; thinking: string; packagePath: string }
+export interface SpawnOptions extends ModelSelection { thinking: string }
 export function finished(task: Task) { return ["completed", "failed", "cancelled"].includes(task.state) && !task.pane; }
 export function view(task: Task) {
   return { taskId: task.taskId, state: task.state, agentName: task.agentName, paneId: task.pane?.paneId,
+    model: task.model, tier: task.tier, modelSource: task.modelSource, thinking: task.thinking,
     diagnostic: task.diagnostic, resultPath: task.resultPath, result: task.outcome ? {
       text: task.outcome.text.slice(0, 12000), stopReason: task.outcome.stopReason, error: task.outcome.error,
       usage: task.outcome.usage, truncated: task.outcome.text.length > 12000
@@ -57,13 +60,14 @@ export class Tasks {
     const promise = fn().catch(() => {}).finally(() => this.pending.delete(promise));
     this.pending.add(promise);
   }
-  async spawn(taskText: string, instructions?: string): Promise<Task> {
+  async spawn(taskText: string, instructions?: string, options?: SpawnOptions): Promise<Task> {
     if (!this.alive) throw new Error("Session observer is closed.");
     if ([...this.tasks.values()].filter(t => !finished(t)).length >= 6) throw new Error("Six active children already reserved; no queue.");
     const id = crypto.randomUUID();
     const task: Task = { taskId: id, task: taskText, instructions, state: "starting", created: new Date().toISOString(),
       agentName: "hs-" + id.replaceAll("-", "").slice(0, 24), sessionId: "hs-" + id, directory: join(this.root, id),
-      model: this.defaults.model, thinking: this.defaults.thinking,
+      model: options?.model ?? this.defaults.model, thinking: options?.thinking ?? this.defaults.thinking,
+      tier: options?.tier, modelSource: options?.modelSource ?? "inherited",
       submitted: false, cancelRequested: false };
     this.tasks.set(id, task); // Synchronous reservation precedes the first await.
     try { await this.save(task); } catch (e) { this.tasks.delete(id); throw e; }
@@ -90,6 +94,7 @@ export class Tasks {
         });
         const args = ["agent", "start", task.agentName, "--kind", "pi", "--pane", task.pane!.paneId, "--timeout", "30000", "--",
           "--session-id", task.sessionId, "--session-dir", join(task.directory, "sessions"),
+          "--provider", splitModelId(task.model ?? this.defaults.model).provider,
           "--model", task.model ?? this.defaults.model, "--thinking", task.thinking ?? this.defaults.thinking, "-e", this.defaults.packagePath];
         if (task.instructions) {
           const path = join(task.directory, "instructions.txt");
@@ -98,7 +103,7 @@ export class Tasks {
           args.push("--append-system-prompt", path);
         }
         await this.layout.startAgent(task.pane!, args);
-        await this.bind(task);
+        await this.bind(task, true);
         const a = await this.layout.validate(task.pane!);
         if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Child is not ready for its single task prompt.");
         if (task.cancelRequested) return;
@@ -135,7 +140,7 @@ export class Tasks {
     try {
       await this.layout.serial.run(async () => {
         if (!this.alive || task.submitted || task.outcome || task.cancelRequested || !task.pane) return;
-        await this.bind(task);
+        await this.bind(task, true);
         const a = await this.layout.validate(task.pane);
         if (!["idle", "done"].includes(String(a.agent_status))) return;
         task.submitted = true; task.state = "working"; await this.save(task);
@@ -150,12 +155,16 @@ export class Tasks {
       task.state = "collection_failed"; task.diagnostic = diagnostic(e); await this.save(task); await this.attention(task);
     }
   }
-  private async bind(task: Task) {
+  private async bind(task: Task, checkStartupModel = false) {
     if (!task.pane) throw new Error("No owned pane.");
     const ready = await readJson<Receipt>(join(task.directory, "ready.json"));
     if (ready.taskId !== task.taskId || ready.sessionId !== task.sessionId) throw new Error("Missing/mismatched child package handshake.");
     task.pane.agentName = task.agentName; task.pane.sessionId = task.sessionId; task.pane.sessionPath = ready.sessionPath;
     await this.save(task);
+    // pi's CLI can fuzzy-match models. Check the actual selection before sending any work.
+    // Legacy tasks have no modelSource and retain their original handshake contract.
+    if (checkStartupModel && task.modelSource && ready.model !== task.model)
+      throw new Error(`Child model mismatch: expected "${task.model}", received "${ready.model ?? "unknown"}". Task not submitted; no automatic model substitution. Pane retained for intervention.`);
   }
   private async receipt(task: Task) {
     try { return await readJson<Receipt>(join(task.directory, "settled.json")); }

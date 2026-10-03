@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { SessionManager, type FileEntry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 
-export interface Receipt { taskId: string; sessionId: string; sessionPath: string; leafId: string | null }
+export interface Receipt { taskId: string; sessionId: string; sessionPath: string; leafId: string | null; model?: string }
 export interface Outcome {
   text: string; stopReason: string; error?: string;
   usage: Usage; modelUsage: { provider: string; model: string; usage: Usage }[];

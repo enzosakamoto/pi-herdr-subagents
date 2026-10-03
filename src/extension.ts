@@ -6,16 +6,25 @@ import { Herdr, type Control } from "./herdr.ts";
 import { paneRef } from "./layout.ts";
 import { Tasks, view, type Task } from "./tasks.ts";
 import { atomicJson, addUsage, zeroUsage, type Receipt } from "./results.ts";
+import { loadConfig, modelIdPattern, selectModel, selectThinking, splitModelId, tiers } from "./config.ts";
 
 const STATE = "herdr-subagents:task";
 const MESSAGE = "herdr-subagents:result";
 const ACCOUNTING = "herdrSubagentUsageTaskIds";
+const tierSchema = Type.Union(tiers.map(tier => Type.Literal(tier)));
+const taskIdSchema = Type.String({ minLength: 1, description: "Task identifier returned by spawn, not a pane or agent ID." });
 export const parameters = Type.Union([
-  Type.Object({ action: Type.Literal("spawn"), task: Type.String({ minLength: 1, maxLength: 100000 }), instructions: Type.Optional(Type.String({ maxLength: 100000 })) }, { additionalProperties: false }),
+  Type.Object({
+    action: Type.Literal("spawn"),
+    task: Type.String({ minLength: 1, maxLength: 100000, description: "Self-contained objective, necessary context, permitted files/write ownership, dependencies and expected deliverable. Children do not inherit the conversation." }),
+    instructions: Type.Optional(Type.String({ maxLength: 100000, description: "Optional specialization appended to the child's system prompt; does not replace task." })),
+    tier: Type.Optional(Type.Union(tiers.map(tier => Type.Literal(tier)), { description: "Choose the lowest adequate tier: low for running tests/reporting, medium for understanding use-case flows, high for deep correctness reviews. Defaults to configured defaultTier (medium). Without model mappings, inherits the principal model, not a cheaper model. Mutually exclusive with model; not a thinking level. Tier config can specify thinking: null means off; omission inherits the principal." })),
+    model: Type.Optional(Type.String({ minLength: 3, pattern: modelIdPattern, description: "Exact provider/model-id override only when the user specifies a model. Mutually exclusive with tier. Otherwise choose tier, not an invented model ID." }))
+  }, { additionalProperties: false, not: { required: ["model", "tier"] } }),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("status"), taskId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("cancel"), taskId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("wait"), taskId: Type.String({ minLength: 1 }), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600000, default: 120000 })) }, { additionalProperties: false })
+  Type.Object({ action: Type.Literal("status"), taskId: taskIdSchema }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("cancel"), taskId: taskIdSchema }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("wait"), taskId: taskIdSchema, timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600000, default: 120000, description: "Maximum observer wait in milliseconds. Timeout does not cancel the child or resend its prompt." })) }, { additionalProperties: false })
 ]);
 const usageSchema = Type.Object({
   input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number(), totalTokens: Type.Number(),
@@ -24,12 +33,15 @@ const usageSchema = Type.Object({
 const taskSchema = Type.Object({
   taskId: Type.String(), state: Type.Union(["starting", "working", "blocked", "collecting", "completed", "failed", "cancelled", "collection_failed", "cleanup_pending"].map(s => Type.Literal(s))),
   agentName: Type.String(), paneId: Type.Optional(Type.String()), diagnostic: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()), tier: Type.Optional(tierSchema),
+  thinking: Type.Optional(Type.String({ description: "Requested startup thinking level, frozen at reservation. pi/provider may adjust it to model support; this is not a guarantee of the effective level." })),
+  modelSource: Type.Optional(Type.Union([Type.Literal("explicit"), Type.Literal("tier"), Type.Literal("inherited")])),
   resultPath: Type.Optional(Type.String()), timedOut: Type.Optional(Type.Boolean()),
   result: Type.Optional(Type.Object({ text: Type.String(), stopReason: Type.String(), error: Type.Optional(Type.String()), usage: usageSchema, truncated: Type.Boolean() }))
 });
 export const outputSchema = Type.Object({ task: Type.Optional(taskSchema), tasks: Type.Optional(Type.Array(taskSchema)), error: Type.Optional(Type.String()) }, { additionalProperties: false });
 
-export default function extension(pi: ExtensionAPI, createControl: () => Control = () => new Herdr(), storageRoot = join(getAgentDir(), "herdr-subagents")) {
+export default function extension(pi: ExtensionAPI, createControl: () => Control = () => new Herdr(), storageRoot = join(getAgentDir(), "herdr-subagents"), agentDir = getAgentDir()) {
   const marker = process.env.PI_HERDR_SUBAGENT;
   if (marker) {
     // No delegation tool is registered in children, even through codemode.
@@ -39,7 +51,8 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
       if (!child || ctx.mode !== "tui" || ctx.sessionManager.getSessionId() !== child.sessionId) return;
       const sessionPath = ctx.sessionManager.getSessionFile();
       if (!sessionPath) return;
-      const receipt: Receipt = { taskId: child.taskId, sessionId: child.sessionId, sessionPath, leafId: ctx.sessionManager.getLeafId() };
+      const receipt: Receipt = { taskId: child.taskId, sessionId: child.sessionId, sessionPath, leafId: ctx.sessionManager.getLeafId(),
+        model: ctx.model ? ctx.model.provider + "/" + ctx.model.id : undefined };
       await atomicJson(join(child.directory, settled ? "settled.json" : "ready.json"), receipt);
     };
     pi.on("session_start", async (_event, ctx) => { await report(ctx, false); });
@@ -151,17 +164,28 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
   });
   pi.registerTool({
     name: "herdr_subagent", label: "Herdr subagent", parameters, outputSchema,
-    description: "Delegate autonomous background work to visible pi TUI children in Herdr. spawn returns after reservation, not completion. Maximum six, no queue/recursion. Define disjoint file write ownership. wait timeout never cancels/resubmits. Blocked requires human intervention. Requires an initially single-pane unzoomed tab.",
-    promptGuidelines: ["Continue independent work after spawn; wait only at a dependency. Never race this tool with raw Herdr pane controls."],
+    description: "Autonomously delegate independent investigations, reviews or disjoint-file implementations to visible pi TUI children in Herdr; no explicit subagent request is needed. Respect user restrictions and avoid delegation overhead for trivial/sequential work. Choose the lowest adequate tier: low to run tests and report results; medium to map and understand a use-case flow; high for deep correctness review of a newly implemented class. Tiers map to user-configured models, not guaranteed prices or thinking levels; without mappings, inherit the principal model. Children receive only supplied context and share filesystem/permissions, not a sandbox. spawn returns after reservation; results arrive automatically as follow-ups. Maximum six; no queue/recursion. wait timeout never cancels/resubmits. Blocked requires human intervention. Requires an initially single-pane unzoomed tab.",
+    promptGuidelines: [
+      "Delegate independent work autonomously when useful within the user's task; an explicit request for subagents is not required. Respect user prohibitions and approval boundaries. Define disjoint file write ownership.",
+      "Choose the lowest adequate tier; medium is the general-purpose default. Running tests/reporting is low, understanding use-case flows is medium, deep logic/invariant/edge-case reviews are high. File size, test duration or the word review alone do not justify high. Never automatically escalate or rerun a failed task on a more expensive model; use explicit model only when the user specifies it.",
+      "Continue independent work after spawn; wait only at a dependency. Never race this tool with raw Herdr pane controls."
+    ],
     async execute(_id, params, signal, _update, ctx) {
       try {
         if (!manager) throw new Error("Herdr observer unavailable. Requires HERDR_ENV=1, a managed pane and session_start.");
         let data: unknown;
         if (params.action === "spawn") {
-          if (!ctx.model) throw new Error("Select a model before delegation.");
-          manager.defaults.model = ctx.model.provider + "/" + ctx.model.id;
-          manager.defaults.thinking = ctx.thinkingLevel ?? "off";
-          data = { task: view(await manager.spawn(params.task, params.instructions)) };
+          // Snapshot the caller before configuration I/O; sibling calls never mutate defaults.
+          const owner = manager, ownerGeneration = generation;
+          const inherited = ctx.model ? ctx.model.provider + "/" + ctx.model.id : undefined;
+          const inheritedThinking = ctx.thinkingLevel ?? "off";
+          const config = await loadConfig(ctx.cwd, agentDir);
+          if (manager !== owner || generation !== ownerGeneration) throw new Error("Session changed while resolving the subagent model; no task was reserved.");
+          const selection = selectModel(config, params, inherited);
+          const { provider, id } = splitModelId(selection.model);
+          if (!ctx.modelRegistry.find(provider, id)) throw new Error(`Unknown chat model "${selection.model}". Configure it in pi before delegation; no automatic fallback.`);
+          const thinking = selectThinking(config, selection, inheritedThinking);
+          data = { task: view(await owner.spawn(params.task, params.instructions, { ...selection, thinking })) };
         } else if (params.action === "list") data = { tasks: manager.list() };
         else if (params.action === "status") data = { task: await manager.status(params.taskId) };
         else if (params.action === "wait") data = { task: await manager.wait(params.taskId, params.timeoutMs, signal) };

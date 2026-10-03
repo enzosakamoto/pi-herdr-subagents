@@ -11,9 +11,15 @@ Veja [cobertura e limitações da verificação](docs/superpowers/plans/2026-10-
 ## Comportamento
 
 O principal reserva uma tarefa e continua trabalhando enquanto um filho pi TUI inicia
-uma sessão nova. Filhos herdam modelo/raciocínio, recebem somente a tarefa/contexto
-fornecidos e não têm acesso à ferramenta de delegação deste package. A especialização
-opcional é acrescentada ao prompt de sistema.
+uma sessão nova. Filhos usam um tier configurado, um modelo explícito ou herdam o modelo
+do principal quando não há mapeamentos. O nível de raciocínio pode ser configurado por tier
+ou herdado do principal, sujeito ao suporte do pi/modelo. Recebem somente a tarefa/contexto fornecidos e não têm acesso à
+ferramenta de delegação deste package. A especialização opcional é acrescentada ao prompt
+de sistema.
+
+O principal pode delegar trabalho independente autonomamente, sem pedido explícito de
+subagentes. Restrições do usuário e limites de aprovação continuam valendo. Evite o custo
+de delegação para tarefas triviais ou estritamente sequenciais.
 
 - Máximo de seis filhos reservados/ativos; sem fila de capacidade nem recursão.
 - Mesmo cwd e tab final do principal.
@@ -70,7 +76,7 @@ O package não escolhe licença/publicação npm pelo usuário.
 Argumentos são chamadas de ferramenta pelo modelo, não comandos de shell:
 
 ```json
-{"action":"spawn","task":"Mapeie as entradas de autenticação. Não altere arquivos. Retorne caminhos relevantes e riscos.","instructions":"Atue como investigador de código focado."}
+{"action":"spawn","tier":"medium","task":"Mapeie as entradas de autenticação. Não altere arquivos. Retorne caminhos relevantes e riscos.","instructions":"Atue como investigador de código focado."}
 {"action":"list"}
 {"action":"status","taskId":"ID_RETORNADO"}
 {"action":"wait","taskId":"ID_RETORNADO","timeoutMs":120000}
@@ -94,6 +100,99 @@ Cancelamento explícito envia Escape ao pi e aguarda quiescência. Busy/unknown 
 cancelamento não permite fechar como se fosse seguro. `idle`/`done` sozinho não é sucesso.
 
 Carregue a orientação distribuída com `/skill:pi-herdr-subagents`.
+
+## Tiers de modelo e configuração
+
+Crie a configuração deliberadamente, globalmente em `<diretório-do-pi>/herdr-subagents.json`
+(normalmente `~/.pi/agent/herdr-subagents.json`, respeitando `PI_CODING_AGENT_DIR`) e/ou em
+`<cwd>/.pi/herdr-subagents.json`. O package não cria esses arquivos automaticamente nem
+altera o `settings.json` do pi.
+
+```json
+{
+  "defaultTier": "medium",
+  "models": {
+    "low": { "model": "provider/modelo-rapido", "thinking": null },
+    "medium": { "model": "provider/modelo-geral", "thinking": "medium" },
+    "high": { "model": "provider/modelo-complexo", "thinking": "high" }
+  }
+}
+```
+
+Os IDs são ilustrativos: substitua por IDs exatos `provider/model-id` de modelos de chat
+configurados no pi. O principal escolhe o tier conforme a tarefa; o código resolve o modelo.
+Tiers são perfis definidos pelo usuário, não garantias de preço ou velocidade.
+
+| Tier | Exemplos |
+|---|---|
+| `low` | Executar uma suíte de testes definida e reportar resultados; localizar referências; conferir imports/formatação. |
+| `medium` | Mapear e entender o fluxo de um use case; implementar uma alteração delimitada; investigar falhas comuns de testes. |
+| `high` | Revisar profundamente uma classe recém-implementada quanto a lógica, invariantes e casos extremos; analisar concorrência/segurança; diagnosticar bugs difíceis. |
+
+Escolha a menor categoria adequada. Executar testes é low; diagnosticar suas falhas pode
+exigir medium ou high. Tamanho do arquivo, duração dos testes ou chamar algo de review não
+justificam high por si só. Faça verificações triviais diretamente, sem abrir um filho.
+Não há escalada ou repetição automática em um modelo mais caro. A skill traz mais exemplos.
+
+Regras de resolução:
+
+1. `model` opcional no spawn seleciona um modelo exato quando solicitado pelo usuário;
+   é mutuamente exclusivo com `tier`. Não invente IDs ou preços autonomamente.
+2. Caso contrário, selecione `tier` ou o `defaultTier` efetivo (implicitamente `medium`).
+3. A configuração do projeto sobrepõe a global **por tier** e para defaultTier.
+   Cada tier do projeto substitui a entrada global inteira, incluindo thinking; sem merge interno.
+4. Sem mapeamentos de modelos (incluindo configuração vazia), herde o modelo atual do
+   principal, mesmo com tier informado. **Escolher low sozinho não reduz o custo.**
+5. Com algum mapeamento, a ausência do tier selecionado é erro, não fallback implícito.
+
+Para um modelo exato solicitado pelo usuário:
+
+```json
+{"action":"spawn","model":"provider/model-id","task":"Faça a investigação somente leitura solicitada."}
+```
+
+Os arquivos são lidos a cada spawn. Configuração inválida/ilegível, campos/tiers desconhecidos,
+IDs inválidos e modelos de chat desconhecidos falham antes da reserva ou abertura do pane,
+inclusive com model explícito. Modelo configurado/explícito funciona sem modelo selecionado
+no principal; herança exige um. Providers, modelos e credenciais também precisam estar
+disponíveis no processo filho; registros/credenciais apenas em memória no principal não são
+transferidos. Falhas de startup/autenticação nunca provocam substituição de modelo.
+Como a CLI do pi aceita fuzzy matching, tarefas novas também conferem o modelo efetivo
+no handshake do filho antes de enviar a tarefa. Modelo divergente/ausente conserva o pane
+com diagnóstico, sem enviar a tarefa; não contorne isso enviando prompts manualmente.
+Tarefas antigas sem modelSource mantêm o contrato original de handshake. Essa checagem
+não bloqueia mudanças manuais de modelo posteriores ao startup.
+
+`spawn`, `list`, `status`, `wait` e follow-ups expõem `model`, `tier` (exceto com model explícito)
+e `modelSource` (`explicit`, `tier` ou `inherited`), além do `thinking` solicitado.
+Registros antigos podem não ter esses campos.
+A escolha é persistida na reserva: chamadas concorrentes, reloads e alterações posteriores de
+configuração não afetam tarefas existentes. O modelo selecionado para startup é distinto da
+contabilidade de uso real por provider/modelo.
+
+### Thinking por tier
+
+Cada entrada de models aceita a string legada de modelo ou um objeto com `model` obrigatório
+e `thinking` opcional. Os formatos podem ser misturados; não é necessário migrar.
+
+- `thinking: null` significa **off**, assim como `thinking: "off"`.
+- Thinking omitido (inclusive nas strings legadas) herda o nível atual do principal;
+  sem nível no principal, solicita off.
+- Valores válidos: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` ou `null`.
+- Valores/campos desconhecidos ou objetos sem modelo válido falham antes da reserva/pane.
+- Uma entrada de projeto omitindo thinking não preserva o thinking global do tier: herda
+  o principal. `model` explícito no spawn também herda o principal e ignora thinking dos tiers,
+  mesmo que o modelo seja igual a um modelo configurado.
+
+Os nomes dos tiers descrevem tarefas, **não níveis literais de thinking**. O exemplo solicita
+off para coleta simples, medium para tarefas gerais e high para análises profundas;
+ajuste ao suporte do modelo e às suas preferências de custo. Não há argumento thinking no spawn.
+
+O thinking solicitado resolvido é persistido na reserva, passado via `--thinking` e exposto
+como `thinking` nos resultados/status/follow-ups. O pi/provider pode ajustá-lo aos níveis
+suportados pelo modelo; esse campo **não garante o nível efetivo**. Em particular, null/off
+não força o desligamento em modelos que não permitem desativar raciocínio. Não há clamp
+próprio da extensão ou rejeição de startup por thinking.
 
 ## Persistência e recuperação
 
@@ -134,9 +233,13 @@ npm run check
 git diff --check
 ```
 
-Trinta e cinco testes determinísticos incluem as 720 ordens de remoção, observadores independentes,
+Testes determinísticos incluem as 720 ordens de remoção, observadores independentes,
 capacidade, bloqueios/startup/cancelamento, ramos, respostas integrais, confirmação do
 follow-up, contabilidade única, discovery de recursos e schemas.
+A cobertura de tiers/thinking inclui precedência/validação de configuração, null/off/omissão,
+escolhas concorrentes, registros antigos e reloads, usando arquivos temporários e Herdr/registros de modelos falsos.
+As mudanças de tiers não têm nova verificação com modelos reais; checagens textuais das
+orientações não são avaliações comportamentais de LLM.
 
 Testes reais são opt-in e exigem **servidor de teste isolado e nomeado já em execução**.
 Não iniciam/param/atualizam servidor nem usam as tabs de implementação/referência:
@@ -153,6 +256,8 @@ dois filhos TUI, cancelamento explícito por Escape e um principal real recebend
 reload/ramo/bloqueio têm cobertura determinística; não se afirma cobertura
 exaustiva de injeção de falhas ao vivo.
 
+[Especificação de thinking](docs/superpowers/specs/2026-10-03-tier-thinking-design.md) ·
+[Especificação de tiers](docs/superpowers/specs/2026-10-03-model-tiers-design.md) ·
 [Especificação](docs/superpowers/specs/2026-10-03-herdr-subagents-design.md) ·
 [Plano](docs/superpowers/plans/2026-10-03-herdr-subagents-plan.md) ·
 [Checkpoint BSP histórico](docs/superpowers/plans/2026-10-03-layout-checkpoint.md)

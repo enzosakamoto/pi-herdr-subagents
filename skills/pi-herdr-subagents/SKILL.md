@@ -1,6 +1,6 @@
 ---
 name: pi-herdr-subagents
-description: Coordinate asynchronous pi subagents in Herdr panes with the herdr_subagent tool. Use when this package is available and the user requests parallel investigations, delegated implementation, background reviews, or management of its child tasks. Do not use for generic terminal management or when the tool is unavailable.
+description: Autonomously coordinate asynchronous pi subagents in Herdr panes with herdr_subagent. Use when a task benefits from independent investigations, focused reviews, disjoint-file implementation, or background validation, even without an explicit request for subagents. Also use to manage existing child tasks and choose economical low/medium/high model tiers. Respect user restrictions; avoid delegation for trivial or strictly sequential work. Do not use for generic terminal management or when the tool is unavailable.
 compatibility: Requires pi, the pi-herdr-subagents extension, Herdr, HERDR_ENV=1, and Herdr's pi lifecycle integration.
 ---
 
@@ -10,7 +10,7 @@ compatibility: Requires pi, the pi-herdr-subagents extension, Herdr, HERDR_ENV=1
 
 This package implements `herdr_subagent` with actions spawn/list/status/wait/cancel. Check the actual available tool/schema before invoking it; if unavailable, explain that the package must be loaded (for example with `pi -e /path/to/pi-herdr-subagents`). Do not invent tool calls or silently replace delegation with raw pane automation.
 
-The main pi must run inside Herdr. The initial tab must contain only the principal; user-owned panes are not adopted or closed. Delegate only after the user authorizes delegation, including standing authorization for autonomous work. This package's agreed workflow permits autonomous delegation when that authorization is present.
+The main pi must run inside Herdr. The initial tab must contain only the principal, unzoomed; user-owned panes are not adopted or closed. Delegate autonomously when independent work benefits the user's task; no explicit subagent request or prior general delegation authorization is required. Respect user restrictions and approval boundaries: delegation does not expand the requested scope or authorize otherwise restricted actions. Discussing subagents or editing this package is not itself a reason to spawn children.
 
 ## Choose independent work
 
@@ -18,15 +18,64 @@ Delegate focused work with a clear deliverable: task, relevant context, permitte
 
 Useful tasks include independent codebase investigations, focused reviews, and implementations in disjoint files. Do not dispatch tests against unfinished shared changes and present their result as a stable validation. Each child has its own conversation but the same filesystem/OS permissions; panes are not sandboxes.
 
+## Choose an economical model tier
+
+Choose the lowest adequate `tier`; the extension resolves it to a user-configured model. These are user-defined profiles, not verified prices, speed guarantees or thinking levels. Do not infer model IDs or prices.
+
+| Tier | Use for | Keep the scope bounded |
+|---|---|---|
+| `low` | Run a defined test suite and report results; locate references; collect logs; check mechanical changes. | Collect evidence or execute clear steps, not open-ended diagnosis or unsolicited fixes. |
+| `medium` | Map and understand a use-case flow from entry point to persistence; explain dependencies/business rules; implement a bounded change; diagnose ordinary failures. | General-purpose default, including when there is no evidence of high complexity. |
+| `high` | Deep correctness review of a newly implemented class for logic, invariants and edge cases; concurrency/security analysis; difficult bugs or consequential architectural trade-offs. | Require depth or meaningful risk, not just a large file or the word review. |
+
+Examples and contrasts:
+
+- **Run tests and report results — low:** “Run npm test and summarize failures.” Start only once the code under test is stable. Long test duration does not justify high.
+- **Understand a use-case flow — medium:** “Map and explain order creation from its API entry to persistence.”
+- **Review a newly implemented class — high:** “Review this class for logic errors, invariants and edge cases.” Report findings; do not implement fixes unless requested.
+- **Formatting/import review — low:** “Check names, imports and formatting.” Do it directly in the principal if trivial.
+- **Diagnose test failures — medium:** distinct from merely running tests; choose high only when the task actually requires difficult analysis such as race conditions.
+
+Do not delegate trivial/sequential work just to use a cheaper tier, duplicate investigations without purpose, or fill all six slots by default. Never automatically escalate or rerun failed/incomplete work on a more expensive model. Evaluate the evidence and the user's scope before deciding a next step.
+
+### Configuration and fallback
+
+Configuration lives in `<pi-agent-dir>/herdr-subagents.json` (normally `~/.pi/agent/herdr-subagents.json`) and `<cwd>/.pi/herdr-subagents.json`. Project entries replace the entire global entry per tier (model and thinking, no nested merge); project defaultTier overrides global defaultTier. Files are read on each spawn. Do not write personal configuration or change configured models without a user request.
+
+```json
+{
+  "defaultTier": "medium",
+  "models": {
+    "low": { "model": "provider/fast-model", "thinking": null },
+    "medium": { "model": "provider/general-model", "thinking": "medium" },
+    "high": { "model": "provider/deep-model", "thinking": "high" }
+  }
+}
+```
+
+Replace these illustrative IDs with exact chat model IDs configured in pi and accessible to child processes. The principal chooses a tier, not an arbitrary model. Use `model: "provider/model-id"` only for a specific model requested by the user; `model` and `tier` are mutually exclusive.
+
+Without tier, use configured defaultTier (otherwise medium). Without any model mappings, inherit the principal model even if tier is specified: **low alone does not make the child cheaper**. If mappings exist but the chosen tier is missing, report the error; do not silently switch tier/model. Invalid configuration or unknown models fail before reserving/opening a pane. No automatic model fallback is performed after startup/authentication failures. New tasks verify the child's actual startup model before submission; a missing/mismatched handshake model retains the pane without sending work. Report the diagnostic rather than bypassing this check with manual prompts.
+
+The result/status includes `model`, `tier` (unless model was explicit), `modelSource` (`explicit`, `tier` or `inherited`) and requested `thinking`. Check these before claiming a cheaper model was used. Model and requested thinking are frozen at reservation; config changes affect only future tasks. Credentials/providers registered only in the principal's memory may not be available in the child.
+
+### Nullable thinking
+
+Model entries may be legacy strings or objects with mandatory `model` and optional `thinking`; formats can be mixed. **thinking null means off**, exactly like the string `"off"`. Omitted thinking (including legacy strings) inherits the principal's snapshot, or requests off if no principal level is available. Do not treat null as inheritance.
+
+Valid thinking values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `null`. A project tier object omitting thinking replaces global thinking, so it inherits the principal rather than the global profile. An explicit model on spawn also inherits the principal and ignores all tier thinking. There is no thinking argument on spawn; do not change the user's profiles to increase reasoning without a request.
+
+Tier labels describe task categories, not literal reasoning levels. For cost-conscious profiles, the example requests off for running tests/reporting, medium for understanding flows and high for deep analysis. pi/provider may adjust requested thinking to model support: `thinking` in status is the requested startup level, **not proof of the effective level**. In particular, null/off cannot force reasoning off on a model that does not support disabling it. The extension does not clamp thinking or reject startup based on it.
+
 ## Dispatch and continue
 
 Use the tool's actual schema. The implemented interface is:
 
 ```json
-{"action":"spawn","task":"Find all authentication entry points. Do not modify files. Return relevant paths, a concise flow description and actionable risks.","instructions":"Act as a focused code investigator."}
+{"action":"spawn","tier":"medium","task":"Find all authentication entry points. Do not modify files. Return relevant paths, a concise flow description and actionable risks.","instructions":"Act as a focused code investigator."}
 ```
 
-Save the returned `taskId`. Spawn returns after durable reservation while startup/model work continues; a live paneId may not exist yet. `instructions` is optional; wait defaults to 120000 ms and permits 1–3600000 ms. Work on an independent part of the user's task instead of repeatedly checking status.
+Save the returned `taskId`. Spawn returns after durable reservation while startup/model work continues; a live paneId may not exist yet. `instructions` is optional system specialization, not a substitute for the task; wait defaults to 120000 ms and permits 1–3600000 ms. Work on an independent part of the user's task instead of repeatedly checking status.
 
 Use the following actions when needed:
 
@@ -60,7 +109,7 @@ The principal keeps the left half in the settled layout. Children share the righ
 
 ## Examples
 
-**Independent investigation:** launch a read-only authentication investigator and a read-only data-model investigator, then implement an unrelated API change. Combine their results once delivered.
+**Independent investigation:** launch a read-only authentication investigator and a read-only data-model investigator, then work on an independent API change within the user's request. Combine their results once delivered.
 
 **Dependency:** launch tests owned by a child only after the input code is stable; work on documentation, then wait for the test task before claiming verification passed.
 

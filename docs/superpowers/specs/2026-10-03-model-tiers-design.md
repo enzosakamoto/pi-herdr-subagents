@@ -65,6 +65,8 @@ IDs são resolvidos exatamente, sem fuzzy matching, alias por dificuldade ou inf
 
 Disponibilidade no registro do principal não garante que credenciais ou providers registrados apenas em memória existam no processo filho. Documentar que o modelo/provider e suas credenciais precisam estar disponíveis aos filhos. Falhas reais de startup/autenticação seguem o fluxo de diagnóstico existente, sem troca automática de modelo.
 
+Refinamento identificado na implementação: a CLI do pi aceita fuzzy matching e inferência de provider. Passar provider explícito e incluir o modelo efetivamente selecionado no handshake do filho. Para tarefas novas, verificar igualdade com o modelo reservado antes de enviar o prompt, também ao retomar startup bloqueado. Modelo divergente ou ausente conserva o pane com diagnóstico e não envia a tarefa. Preservar a compatibilidade do handshake de registros legados sem modelSource; essa verificação não pretende impedir mudanças manuais de modelo posteriores ao startup.
+
 ## Orientação econômica e exemplos
 
 Os tiers são perfis definidos pelo usuário, não garantias verificadas de preço, latência ou capacidade. Não consultar preços, usar outro classificador ou escolher IDs automaticamente.
@@ -105,7 +107,8 @@ Os campos novos devem ser compatíveis com registros antigos onde estiverem ause
 
 - Módulo focado em configuração: leitura, validação, merge e resolução, com caminhos injetáveis para testes.
 - `src/extension.ts`: descrições do schema, resolução/validação de modelo via contexto pi e passagem de opções por chamada.
-- `src/tasks.ts`: captura e persistência das escolhas na reserva, argumentos de startup e projeção em view.
+- `src/tasks.ts`: captura e persistência das escolhas na reserva, argumentos de startup, confirmação do modelo no handshake e projeção em view.
+- `src/results.ts`: campo opcional de modelo no Receipt, compatível com registros antigos.
 - `skills/pi-herdr-subagents/SKILL.md`: descoberta para delegação autônoma, seleção econômica e exemplos.
 - READMEs inglês e português: configuração, precedência, fallback, limitações e novos argumentos.
 
@@ -124,6 +127,7 @@ Testes determinísticos, sem credenciais reais, arquivos pessoais ou panes reais
 7. Spawns concorrentes com tiers/modelos diferentes; escolha congelada e restaurada após reload.
 8. Campos de retorno e compatibilidade com registros legados.
 9. Conteúdo da tool/skill consistente com delegação autônoma, exemplos low/medium/high e limites econômicos. Testes textuais não são prova de comportamento de um LLM.
-10. Regressão da suíte existente, typecheck e git diff --check.
+10. Handshake com modelo real, divergente ou ausente; nenhuma submissão/resubmissão diante de divergência, preservando cancelamento seguro.
+11. Regressão da suíte existente, typecheck e git diff --check.
 
 Execuções de modelo e avaliações comportamentais reais ficam fora da validação automática padrão para evitar gastos e alterações de ambiente não solicitados.
