@@ -4,7 +4,7 @@
 
 Subagentes assíncronos do pi, executados visivelmente em panes do Herdr. Delegue trabalho independente, continue trabalhando enquanto novas sessões pi executam em paralelo e receba cada resultado como follow-up na sessão principal.
 
-<!-- VÍDEO HERO: insira a demonstração aqui ou use uma miniatura com link para o vídeo hospedado. -->
+![Demo](./assets/demo.gif)
 
 ## Início rápido
 

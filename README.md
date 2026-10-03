@@ -4,7 +4,7 @@
 
 Asynchronous pi subagents, visibly running in Herdr terminal panes. Delegate independent work, keep working while fresh pi sessions run in parallel, and receive each result as a follow-up in the principal session.
 
-<!-- HERO VIDEO: embed the demo here, or use a thumbnail linked to the hosted video. -->
+![Demo](./assets/demo.gif)
 
 ## Quick start
 
