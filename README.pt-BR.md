@@ -42,25 +42,55 @@ de delegação para tarefas triviais ou estritamente sequenciais.
 
 - Máximo de seis filhos reservados/ativos; sem fila de capacidade nem recursão.
 - Mesmo cwd e tab final do principal.
-- Inicialmente a tab precisa conter apenas o principal, sem zoom.
-- Com 1–3 filhos: principal à esquerda 50%, uma coluna de filhos à direita 50%.
-- Com 4–6: principal 50%, duas colunas de 25%, até três linhas balanceadas por coluna.
+- A tab deve estar sem zoom. Panes do usuário já abertos são permitidos; nunca são adotados, movidos ou fechados.
+- As proporções usam somente a região disponível do pane principal que invocou a ferramenta, não a tab inteira.
+- Principal à esquerda com 50%; filhos dividem os outros 50% em uma ou duas colunas, até três linhas balanceadas por coluna.
+- O segundo filho abre a segunda coluna; os seguintes entram abaixo da coluna menos ocupada (empate: esquerda).
+- Fechar um filho equilibra somente sua coluna. Coluna vazia colapsa; reabrir ao lado de uma pilha sobrevivente cria a nova coluna à esquerda dela.
 - Após concluir: persistir o resultado integral, entregá-lo como **follow-up**, fechar
-  somente o pane próprio correspondente e compactar sobreviventes.
+  somente o pane próprio correspondente e compactar sobreviventes. Sem filhos, o principal
+  recupera toda a região local, preservando os panes externos.
 - Uma mensagem na fila do principal ocupado ainda não é entrega: o pane permanece
   até o follow-up entrar efetivamente no transcript.
 - Bloqueios/coletas incertas conservam o pane. Nenhuma aprovação é enviada automaticamente.
 
-### Adaptação BSP autorizada
+Principal e filhos devem permanecer em uma subárvore BSP dedicada. Panes externos a ela
+são permitidos, inclusive os adicionados depois. Se um pane do usuário for inserido dentro
+da subárvore própria ou um filho for movido para fora dela, o controle de layout para e
+exige reconciliação, em vez de reorganizar trabalho do usuário. Panes preexistentes, mesmo
+shells vazios, não são reaproveitados automaticamente. As divisões relativas seguem as
+medidas atuais da janela/região; as dimensões não são congeladas no primeiro spawn.
 
-O Herdr não reparenta um pane dentro da própria tab. Mudanças de layout usam uma tab
-temporária `hs-staging` **no mesmo workspace**, movendo os mesmos terminais vivos para
-fora e de volta com `--no-focus`. Sem `layout.apply`, recriação de terminal ou reinício
-de workers. O staging desaparece quando vazio. A geometria é transitória durante as
-mutações; geometria final, continuidade dos processos e foco principal/filho selecionado
-foram testados ao vivo. Um filho sobrevivente selecionado recupera o foco se o Herdr
-voltou ao principal; se o usuário selecionou outro pane/tab/workspace durante a operação,
-a extensão não toma esse novo foco.
+### Layout BSP incremental
+
+Cada spawn cria **exatamente um pane filho**, com split local e ajustes precisos de
+proporção pela API socket `layout.set_split_ratio` do Herdr. Sem shells auxiliares,
+swaps, staging, movimentos entre tabs, `layout.apply`, recriação de terminal ou reinício
+de workers. Filhos vivos conservam pane, terminal, agente, sessão e ordem vertical.
+O número de colunas depende do histórico, não apenas da quantidade atual de filhos.
+
+Para reabrir uma coluna ao lado de uma pilha sobrevivente, aumentar temporariamente o
+principal para 75% e dividi-lo em 2/3: principal 50%, coluna nova 25%, coluna existente 25%.
+A região própria continua uma subárvore dedicada, apesar da mudança interna na árvore BSP.
+O preflight exige **3×3 células por pane próprio em todas as etapas**; amplie a região se necessário.
+
+Splits e ajustes de proporção não selecionam filhos deliberadamente. Mudança externa
+observada de foco pausa novas mutações; não há garantia atômica de foco. Filho selecionado
+encerrado volta ao principal somente enquanto o efeito registrado do fechamento permanecer válido.
+
+A reserva nova precisa atingir foreground comprovado de shell antes de iniciar pi.
+PID/nome/argumentos são conferidos; jobs temporários e metadados indisponíveis recebem
+espera limitada, mas mudanças explícitas de identidade interrompem o controle. Dividir
+um pane de agente trabalhando verifica sua identidade, não prontidão de shell.
+`status`/reload removem vínculos de reservas ausentes só após `pane_not_found` definitivo,
+sem adotar substitutos.
+
+Journal privado v2 e entries do ramo ativo permitem recuperar sem relançar agentes ou
+repetir prompts. IDs de split desconhecidos, ajustes/fechamentos incertos não aplicados
+e mudanças de ocupante/topologia não são adotados nem repetidos cegamente. Cancele
+explicitamente reservas próprias ainda não iniciadas. Journals v1 de reconstrução pendentes
+e filhos legados em outra tab exigem reconciliação manual; tabs `hs-staging`/sidebars existentes
+não são limpas automaticamente. Veja Verificação para evidências simuladas e reais isoladas.
 
 ## Requisitos e instalação
 
@@ -71,7 +101,7 @@ a extensão não toma esse novo foco.
 | Integração de ciclo de vida | Integração pi funcional; testada com v9 (`herdr integration status`) |
 | Runtime para testes de desenvolvimento | Node 24+ e npm |
 
-Restrições adicionais: execute o principal dentro do Herdr (`HERDR_ENV=1` e pane gerenciado) e disponibilize credenciais de modelo aos processos filhos. As sessões são separadas, mas **arquivos, credenciais e permissões do sistema são compartilhados**; separe responsabilidades de escrita. A tab inicial deve conter apenas o principal e não pode estar em zoom. A instalação/atualização da integração de ciclo de vida é separada; este package não altera `herdr-agent-state.ts` nem suas configurações.
+Restrições adicionais: execute o principal dentro do Herdr (`HERDR_ENV=1` e pane gerenciado) e disponibilize credenciais de modelo aos processos filhos. As sessões são separadas, mas **arquivos, credenciais e permissões do sistema são compartilhados**; separe responsabilidades de escrita. A tab não pode estar em zoom; panes do usuário são permitidos fora da subárvore principal/filhos. A instalação/atualização da integração de ciclo de vida é separada; este package não altera `herdr-agent-state.ts` nem suas configurações.
 
 Experimente sem gravar configurações pessoais:
 
@@ -254,14 +284,24 @@ Desenvolvimento exige Node 24+ (testes TypeScript nativos) e npm:
 
 ```bash
 npm ci
-npm test
+env -u PI_HERDR_SUBAGENT npm test
 npm run check
 git diff --check
 ```
 
+Remova `PI_HERDR_SUBAGENT` ao executar a suíte a partir de um filho delegado: testes
+de extensão em modo principal não devem herdar seu marcador nem escrever seus receipts.
+
 Testes determinísticos incluem as 720 ordens de remoção, observadores independentes,
 capacidade, bloqueios/startup/cancelamento, ramos, respostas integrais, confirmação do
 follow-up, contabilidade única, discovery de recursos e schemas.
+A [cobertura de layout local](docs/superpowers/plans/2026-10-03-principal-region-layout-verification.md)
+inclui panes externos nas quatro direções, o layout de referência com oito panes,
+redimensionamento, foco externo/filho e recuperação histórica de staging.
+A [cobertura same-tab](docs/superpowers/plans/2026-10-03-same-tab-layout-verification.md)
+registra o algoritmo histórico de reconstrução. A [cobertura incremental](docs/superpowers/plans/2026-10-04-incremental-layout-verification.md)
+verifica recuperação de ratios/splits, históricos de criação/fechamento, reabertura,
+geometria mínima, foco, hooks de plugin e vínculo ao ramo, sem swaps ou auxiliares.
 A cobertura de tiers/thinking inclui precedência/validação de configuração, null/off/omissão,
 escolhas concorrentes, registros antigos e reloads, usando arquivos temporários e Herdr/registros de modelos falsos.
 As mudanças de tiers não têm nova verificação com modelos reais; checagens textuais das
@@ -271,17 +311,21 @@ Testes reais são opt-in e exigem **servidor de teste isolado e nomeado já em e
 Não iniciam/param/atualizam servidor nem usam as tabs de implementação/referência:
 
 ```bash
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live-tasks
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste npm run test:live-extension
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste HERDR_TEST_SOCKET=/socket/absoluto/de/teste npm run test:live
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste HERDR_TEST_SOCKET=/socket/absoluto/de/teste npm run test:live-tasks
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=sua-sessao-de-teste HERDR_TEST_SOCKET=/socket/absoluto/de/teste npm run test:live-extension
 ```
 
-Os dois últimos fazem chamadas de modelo. Os testes criam/limpam somente workspaces
+O socket explícito deve pertencer à sessão isolada selecionada. O teste de layout inicia
+pi TUIs ociosos, sem prompts ou chamadas de modelo; os dois últimos fazem chamadas de modelo.
+Os testes criam/limpam somente workspaces
 próprios; falhas conservam panes/evidências para diagnóstico. Passaram layout real,
 dois filhos TUI, cancelamento explícito por Escape e um principal real recebendo follow-ups/contabilidade. Bordas de
 reload/ramo/bloqueio têm cobertura determinística; não se afirma cobertura
 exaustiva de injeção de falhas ao vivo.
 
+[Especificação de layout incremental](docs/superpowers/specs/2026-10-04-incremental-layout-design.md) ·
+[Especificação de layout local](docs/superpowers/specs/2026-10-03-principal-region-layout-design.md) ·
 [Especificação de thinking](docs/superpowers/specs/2026-10-03-tier-thinking-design.md) ·
 [Especificação de tiers](docs/superpowers/specs/2026-10-03-model-tiers-design.md) ·
 [Especificação](docs/superpowers/specs/2026-10-03-herdr-subagents-design.md) ·

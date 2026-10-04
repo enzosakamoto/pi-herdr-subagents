@@ -2,20 +2,22 @@ import { watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { type Control, HerdrError, object } from "./herdr.ts";
-import { Layout, type PaneRef } from "./layout.ts";
+import { Layout, paneRef, type PaneRef } from "./layout.ts";
 import { atomicJson, collect, readJson, zeroUsage, type Receipt, type Outcome } from "./results.ts";
 import { splitModelId, type ModelSelection, type ModelSource, type Tier } from "./config.ts";
+import { sameRef, type LayoutState, type CloseFocusState } from "./layout-state.ts";
 
 export type State = "starting" | "working" | "blocked" | "collecting" | "completed" | "failed" | "cancelled" | "collection_failed" | "cleanup_pending";
 export interface Task {
   taskId: string; task: string; instructions?: string; state: State; created: string;
   agentName: string; sessionId: string; directory: string; pane?: PaneRef;
   model?: string; thinking?: string; tier?: Tier; modelSource?: ModelSource;
-  submitted: boolean; cancelRequested: boolean; diagnostic?: string; outcome?: Outcome; resultPath?: string;
-  attentionSent?: boolean; notified?: boolean;
+  submitted: boolean; cancelRequested: boolean; launchAttempted?: boolean; diagnostic?: string; outcome?: Outcome; resultPath?: string;
+  attentionSent?: boolean; notified?: boolean; closeFocus?: CloseFocusState; closeAttempted?: boolean;
 }
 export interface Hooks {
   persist(task: Task): Promise<void>;
+  persistLayout?(state: LayoutState): Promise<void>;
   /** false means queued, not yet admitted to the principal transcript. */
   notify(task: Task, attention: boolean): Promise<boolean | void>;
 }
@@ -39,14 +41,23 @@ export class Tasks {
   readonly root: string;
   readonly defaults: Defaults;
   readonly hooks: Hooks;
+  private layoutProblem?: string;
   constructor(cli: Control, principal: PaneRef, root: string, defaults: Defaults, hooks: Hooks) {
     this.root = resolve(root); this.defaults = defaults; this.hooks = hooks;
     this.cli = {
-      json: (args, signal, timeout) => cli.json(args, signal ?? this.controller.signal, timeout),
-      text: (args, signal, timeout) => cli.text(args, signal ?? this.controller.signal, timeout)
+      json: (args, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.json(args, signal ?? this.controller.signal, timeout),
+      text: (args, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.text(args, signal ?? this.controller.signal, timeout),
+      setSplitRatio: (tabId, path, ratio, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.setSplitRatio(tabId, path, ratio, signal ?? this.controller.signal, timeout)
     };
     this.layout = new Layout(this.cli, principal, async () => {
       for (const task of this.tasks.values()) if (task.pane) await this.save(task);
+    }, {
+      owner: this.root, cwd: defaults.cwd, taskIds: () => [...this.tasks.keys()],
+      tasksFor: panes => [...this.tasks.values()].filter(t => t.pane && panes.includes(t.pane.paneId)).map(t => t.taskId),
+      persist: async state => {
+        await atomicJson(join(this.root, "layout.json"), state);
+        if (this.alive) await this.hooks.persistLayout?.(structuredClone(state));
+      }
     });
   }
   private get alive() { return !this.controller.signal.aborted; }
@@ -62,6 +73,7 @@ export class Tasks {
   }
   async spawn(taskText: string, instructions?: string, options?: SpawnOptions): Promise<Task> {
     if (!this.alive) throw new Error("Session observer is closed.");
+    if (this.layoutProblem || this.layout.needsRecovery) throw new Error(this.layoutProblem ?? "Layout recovery pending; consult status before spawning.");
     if ([...this.tasks.values()].filter(t => !finished(t)).length >= 6) throw new Error("Six active children already reserved; no queue.");
     const id = crypto.randomUUID();
     const task: Task = { taskId: id, task: taskText, instructions, state: "starting", created: new Date().toISOString(),
@@ -102,7 +114,9 @@ export class Tasks {
           await writeFile(path, task.instructions, { mode: 0o600 });
           args.push("--append-system-prompt", path);
         }
-        await this.layout.startAgent(task.pane!, args);
+        await this.layout.startAgent(task.pane!, args, async () => {
+          task.launchAttempted = true; await this.save(task); // Intent after shell readiness, not proof of execution.
+        });
         await this.bind(task, true);
         const a = await this.layout.validate(task.pane!);
         if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Child is not ready for its single task prompt.");
@@ -111,7 +125,7 @@ export class Tasks {
         await this.save(task); // Intent precedes the single remote submission.
         prompting = this.cli.json(["agent", "prompt", task.agentName, "[herdr-subagent:" + task.taskId + "]\n" + task.task, "--wait"], undefined, 0)
           .then(() => ({}), error => ({ error }));
-        // Do not stage this new pane until its prompt has started activity (or settled).
+        // Do not reorganize this new pane until its prompt has started activity (or settled).
         // A failed gate is diagnostic only: submission is never retried.
         try { await this.cli.json(["agent", "wait", task.agentName, "--until", "working", "--timeout", "5000"], undefined, 7000); }
         catch (e) { task.diagnostic = diagnostic(e); await this.save(task); }
@@ -255,14 +269,55 @@ export class Tasks {
   }
   private async cleanup(task: Task) {
     if (!task.pane || !task.outcome || !task.resultPath || !task.notified) return;
+    if (this.layoutProblem) throw new Error(this.layoutProblem);
+    await this.recoverLayout();
     const ref = task.pane;
-    const a = await this.layout.validate(ref);
-    if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Cannot close non-quiescent child.");
-    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; task.state = "collecting"; await this.save(task); });
+    if (task.closeAttempted) throw new Error("Previous child close is uncertain; reconcile its absence with status before any resend.");
+    if (!ref.agentName && task.cancelRequested && !task.submitted) await this.layout.awaitShell(ref);
+    else {
+      const a = await this.layout.validate(ref);
+      if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Cannot close non-quiescent child.");
+    }
+    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; delete task.closeAttempted; task.state = "collecting"; await this.save(task); },
+      async state => { task.closeFocus = state; await this.save(task); },
+      async attempted => { task.closeAttempted = attempted || undefined; await this.save(task); });
     task.state = task.cancelRequested || task.outcome.stopReason === "aborted" ? "cancelled" : task.outcome.stopReason === "stop" ? "completed" : "failed";
     await this.save(task);
   }
-  async restore(records: Task[]) {
+  private async ownReservation(reserved: PaneRef) {
+    const id = this.layout.reservedTaskId;
+    if (!id) throw new Error("Missing active-branch task for the new layout slot.");
+    const task = this.task(id);
+    if (task.pane && !sameRef(task.pane, reserved)) throw new Error("Reserved child ownership changed; refusing journal adoption.");
+    if (!task.pane) {
+      await this.layout.awaitShell(reserved); task.pane = { ...reserved };
+      task.state = "collection_failed"; task.diagnostic = "Recovered an unstarted reservation; cancel explicitly. No prompt was sent.";
+      await this.save(task);
+    }
+  }
+  private async recoverLayout(resetFocus = false) {
+    await this.layout.recover(this.ownRefs(), resetFocus, ref => this.ownReservation(ref));
+  }
+  private async reconcileReservation(task: Task, includeStarting = false): Promise<boolean> {
+    if (this.layout.pending || !task.pane || task.pane.agentName || task.submitted || task.outcome || (!includeStarting && task.state === "starting")) return false;
+    const ref = task.pane;
+    try {
+      const current = paneRef((await this.cli.json(["pane", "get", ref.paneId])).pane);
+      if (!sameRef(current, ref)) throw new Error("Reservation moved or replaced; refusing control: " + ref.paneId);
+      return false;
+    } catch (e) {
+      if (!this.alive) return true;
+      if (e instanceof HerdrError && e.code === "pane_not_found" && !e.uncertain) {
+        delete task.pane; task.state = "failed";
+        task.diagnostic = "Owned reservation disappeared; no replacement adopted. " + diagnostic(e);
+      } else {
+        task.state = "collection_failed";
+        task.diagnostic = "Reservation identity unproven; pane retained, no input/closure attempted. " + diagnostic(e);
+      }
+      await this.save(task); return true;
+    }
+  }
+  async restore(records: Task[], branchLayout?: LayoutState | null) {
     for (const record of records) {
       // Forked/copied history must not adopt another principal session\'s workers.
       if (typeof record.directory !== "string" || typeof record.taskId !== "string" ||
@@ -273,7 +328,32 @@ export class Tasks {
       } catch {}
       this.tasks.set(task.taskId, task);
     }
-    for (const task of this.tasks.values()) if (!finished(task) || (task.outcome && !task.notified)) this.launch(async () => {
+    let state = branchLayout ?? null;
+    try {
+      if (state?.record) {
+        let disk: LayoutState | undefined;
+        try { disk = await readJson<LayoutState>(join(this.root, "layout.json")); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+        // Disk progress/tombstones are eligible only for the transaction named
+        // by this branch, never for an unrelated abandoned branch.
+        if (disk?.transactionId === state.transactionId) state = disk;
+      }
+      this.layout.load(state ?? null);
+    } catch (e) { this.layoutProblem = diagnostic(e); return; }
+    const reconciled = new Set<string>();
+    try {
+      await this.layout.serial.run(async () => {
+        if (!this.layout.pending) for (const task of this.tasks.values())
+          if (await this.reconcileReservation(task, true)) reconciled.add(task.taskId);
+        await this.recoverLayout();
+      });
+    } catch (e) {
+      for (const task of this.tasks.values()) if (task.pane) {
+        task.state = task.outcome ? "cleanup_pending" : "collection_failed"; task.diagnostic = diagnostic(e); await this.save(task);
+      }
+      return;
+    }
+    for (const task of this.tasks.values()) if (!reconciled.has(task.taskId) && (!finished(task) || (task.outcome && !task.notified))) this.launch(async () => {
       try {
         if (task.outcome && !task.pane) {
           if (task.state === "cleanup_pending" || task.state === "collecting") await this.layout.serial.run(() => this.layout.compact(this.ownRefs(task)));
@@ -282,6 +362,11 @@ export class Tasks {
           await this.save(task); return;
         }
         if (!task.pane) { task.state = "failed"; task.diagnostic = "Startup interrupted before pane ownership was recorded; not relaunching."; await this.save(task); return; }
+        if (!task.launchAttempted && !task.pane.agentName && !task.submitted) {
+          await this.layout.awaitShell(task.pane); task.state = "collection_failed";
+          task.diagnostic = "Unstarted reservation retained; cancel explicitly. Recovery never launches agents or prompts.";
+          await this.save(task); await this.attention(task); return;
+        }
         await this.bind(task);
         await this.layout.validate(task.pane);
         if (task.outcome) {
@@ -320,13 +405,22 @@ export class Tasks {
   task(id: string) { const task = this.tasks.get(id); if (!task) throw new Error("Unknown taskId: " + id); return task; }
   async status(id: string) {
     const task = this.task(id);
+    if (this.layoutProblem) return { ...view(task), diagnostic: this.layoutProblem };
+    if (this.layout.pending) {
+      try { await this.layout.serial.run(() => this.recoverLayout(true)); }
+      catch (e) { task.diagnostic = diagnostic(e); await this.save(task); return view(task); }
+    }
     if (task.state === "cleanup_pending" && task.outcome && task.notified) {
       try {
         await this.layout.serial.run(async () => {
           if (task.state !== "cleanup_pending") return;
           if (task.pane) {
             try { await this.layout.validate(task.pane); }
-            catch (e) { if (e instanceof HerdrError && e.code === "pane_not_found") { delete task.pane; await this.save(task); } else throw e; }
+            catch (e) {
+              if (e instanceof HerdrError && e.code === "pane_not_found" && !e.uncertain) {
+                await this.layout.restoreClosedFocus(task.closeFocus, task.pane); delete task.closeFocus; delete task.closeAttempted; delete task.pane; await this.save(task);
+              } else throw e;
+            }
           }
           if (task.pane) await this.cleanup(task);
           else {
@@ -337,6 +431,7 @@ export class Tasks {
         });
       } catch (e) { task.diagnostic = diagnostic(e); await this.save(task); }
     }
+    if (await this.layout.serial.run(() => this.reconcileReservation(task))) return view(task);
     if (task.pane && !task.pane.agentName && !task.submitted && task.state !== "starting") {
       try { await this.bind(task); } catch { /* A startup dialog can precede the package handshake. No control is safe yet. */ }
     }
@@ -387,8 +482,22 @@ export class Tasks {
     const task = this.task(id);
     if (finished(task)) return view(task);
     task.cancelRequested = true; await this.save(task);
-    if (!task.pane) return view(task); // Starting work sees the cancellation before launch.
-    if (!task.pane.agentName) return view(task); // Startup owns the serial lock and will cancel when ready.
+    if (this.layoutProblem) throw new Error(this.layoutProblem);
+    if (task.state === "starting" && !task.pane?.agentName) return view(task); // In-flight startup observes this flag before prompting.
+    if (this.layout.pending) await this.layout.serial.run(() => this.recoverLayout(true));
+    if (!task.pane) return view(task);
+    if (!task.pane.agentName) {
+      await this.layout.serial.run(async () => {
+        await this.layout.checkTab(this.ownRefs()); await this.layout.awaitShell(task.pane!);
+        task.outcome = { text: "Cancelled before prompt submission.", stopReason: "aborted", usage: zeroUsage(), modelUsage: [] };
+        task.resultPath = join(task.directory, "result.json"); await atomicJson(task.resultPath, task.outcome);
+        task.state = "cancelled"; await this.save(task);
+        if (!task.notified) { task.notified = (await this.hooks.notify(task, false)) !== false; await this.save(task); }
+        try { await this.cleanup(task); }
+        catch (e) { task.state = "cleanup_pending"; task.diagnostic = diagnostic(e); await this.save(task); throw e; }
+      });
+      return view(task);
+    }
     await this.layout.serial.run(async () => {
       const a = await this.layout.validate(task.pane!);
       if (["working", "blocked", "unknown"].includes(String(a.agent_status))) {
@@ -406,7 +515,8 @@ export class Tasks {
         await atomicJson(task.resultPath, task.outcome);
         task.state = "cancelled"; await this.save(task);
         if (!task.notified) { task.notified = (await this.hooks.notify(task, false)) !== false; await this.save(task); }
-        await this.cleanup(task);
+        try { await this.cleanup(task); }
+        catch (e) { task.state = "cleanup_pending"; task.diagnostic = diagnostic(e); await this.save(task); throw e; }
       });
     } else if (await this.receipt(task)) await this.status(id);
     return view(task);

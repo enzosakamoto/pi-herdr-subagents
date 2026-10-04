@@ -6,8 +6,9 @@ import { Herdr } from "../src/herdr.ts";
 import { paneRef } from "../src/layout.ts";
 import { Tasks, finished } from "../src/tasks.ts";
 if (process.env.HERDR_LIVE_TEST !== "1") throw new Error("Opt-in only; uses two real pi TUI children and model calls.");
-const session = process.env.HERDR_TEST_SESSION ?? "pi-herdr-subagents-test-20261003";
-const cli = new Herdr(process.env, undefined, ["--session", session]);
+const session = process.env.HERDR_TEST_SESSION ?? "pi-herdr-subagents-test-20261003", socket = process.env.HERDR_TEST_SOCKET;
+if (session === "default" || !socket || socket === process.env.HERDR_SOCKET_PATH) throw new Error("Require an explicit isolated HERDR_TEST_SOCKET matching HERDR_TEST_SESSION.");
+const cli = new Herdr(process.env, undefined, ["--session", session], socket);
 const created = await cli.json(["workspace", "create", "--label", "hs-task-verification", "--cwd", process.cwd(), "--no-focus"]);
 const principal = paneRef(created.root_pane), root = await mkdtemp(join(tmpdir(), "hs-live-tasks-"));
 const manager = new Tasks(cli, principal, root, { cwd: process.cwd(), model: (process.env.PI_PROVIDER ?? "openai-codex") + "/" + (process.env.PI_MODEL ?? "gpt-6.1-sol"),

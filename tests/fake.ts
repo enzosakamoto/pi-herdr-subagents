@@ -12,11 +12,19 @@ export class Fake implements Control {
   calls: string[][] = [];
   agents = new Map<string, { pane: string; task: Task; prompt?: string; resolve?: () => void }>();
   focus = "principal";
+  focusHistory: string[] = [];
+  swapChangedFalse = false;
+  processInfo?: (paneId: string, query: number) => Record<string, unknown>;
+  processInfoQueries = new Map<string, number>();
+  area = { x: 0, y: 0, width: 203, height: 57 };
   zoomed = false;
   startBlocked = false;
   startupModel?: string | null;
   delayStart: Promise<void> = Promise.resolve();
   error?: (args: string[]) => Error | undefined;
+  afterError?: (args: string[]) => Error | undefined;
+  sidebarOnTabCreation = false;
+  tabCreatedHooks = 0;
   constructor() {
     this.panes.set("principal", { pane_id: "principal", terminal_id: "main-terminal", tab_id: "original", workspace_id: "workspace", agent_status: "unknown" });
     this.tabs.set("original", { pane: "principal" });
@@ -27,7 +35,7 @@ export class Fake implements Control {
     this.panes.set(id, p); return p;
   }
   insert(root: Node, target: string, pane: string, direction: string, ratio: number): Node {
-    if ("pane" in root) return root.pane === target ? { direction, ratio, left: root, right: { pane } } : root;
+    if ("pane" in root) return root.pane === target ? { direction, ratio: Math.fround(ratio), left: root, right: { pane } } : root;
     return { ...root, left: this.insert(root.left, target, pane, direction, ratio), right: this.insert(root.right, target, pane, direction, ratio) };
   }
   remove(root: Node, target: string): Node | undefined {
@@ -36,15 +44,30 @@ export class Fake implements Control {
     return left && right ? { ...root, left, right } : left ?? right;
   }
   layout(tab: string) {
-    const result: unknown[] = [];
+    const result: { pane_id: string; rect: { x: number; y: number; width: number; height: number } }[] = [];
+    const splits: { id: string; direction: string; ratio: number; rect: { x: number; y: number; width: number; height: number } }[] = [];
     const walk = (n: Node, x: number, y: number, width: number, height: number) => {
       if ("pane" in n) { result.push({ pane_id: n.pane, rect: { x, y, width, height } }); return; }
-      const size = Math.round((n.direction === "right" ? width : height) * n.ratio);
+      splits.push({ id: "split-" + splits.length, direction: n.direction, ratio: n.ratio, rect: { x, y, width, height } });
+      const size = Math.round(Math.fround((n.direction === "right" ? width : height) * Math.fround(n.ratio)));
       if (n.direction === "right") { walk(n.left, x, y, size, height); walk(n.right, x + size, y, width - size, height); }
       else { walk(n.left, x, y, width, size); walk(n.right, x, y + size, width, height - size); }
     };
-    walk(this.tabs.get(tab)!, 0, 0, 203, 57);
-    return { area: { x: 0, y: 0, width: 203, height: 57 }, panes: result, focused_pane_id: this.focus, zoomed: this.zoomed };
+    walk(this.tabs.get(tab)!, this.area.x, this.area.y, this.area.width, this.area.height);
+    return { tab_id: tab, workspace_id: "workspace", area: { ...this.area }, panes: result, splits, focused_pane_id: this.focus, zoomed: this.zoomed };
+  }
+  async setSplitRatio(tabId: string, path: boolean[], ratio: number): Promise<Record<string, unknown>> {
+    const args = ["layout", "set_split_ratio", tabId, JSON.stringify(path), String(ratio)];
+    this.calls.push(args);
+    const error = this.error?.(args); if (error) throw error;
+    const replace = (node: Node, remaining: boolean[]): Node => {
+      if ("pane" in node) throw new HerdrError("Invalid split path", "invalid_split_path");
+      if (!remaining.length) return { ...node, ratio: Math.fround(ratio) };
+      return remaining[0] ? { ...node, right: replace(node.right, remaining.slice(1)) } : { ...node, left: replace(node.left, remaining.slice(1)) };
+    };
+    this.tabs.set(tabId, replace(this.tabs.get(tabId)!, path));
+    const after = this.afterError?.(args); if (after) throw after;
+    return { layout: this.layout(tabId) };
   }
   async json(args: string[], signal?: AbortSignal): Promise<Record<string, unknown>> {
     this.calls.push(args);
@@ -55,19 +78,58 @@ export class Fake implements Control {
     const [group, action, id] = args;
     if (group === "tab" && action === "create") {
       const tab = "stage-" + ++this.count, p = this.newPane(tab, env);
-      this.tabs.set(tab, { pane: String(p.pane_id) }); return { root_pane: p };
+      this.tabs.set(tab, { pane: String(p.pane_id) });
+      this.tabCreatedHooks++;
+      if (this.sidebarOnTabCreation) {
+        const sidebar = this.newPane(tab); Object.assign(sidebar, { label: "Sidebar", tokens: { "herdr-sidebar-explorer": "hook" } });
+        this.tabs.set(tab, this.insert(this.tabs.get(tab)!, String(p.pane_id), String(sidebar.pane_id), "right", 0.8));
+      }
+      return { root_pane: p };
     }
+    if (group === "tab" && action === "focus") { this.focus = this.layout(id).panes[0].pane_id; this.focusHistory.push(this.focus); return {}; }
     if (group === "pane") {
-      if (action === "process-info") return { process_info: { shell_pid: 1, foreground_process_group_id: 1, foreground_processes: [{ pid: 1 }] } };
+      if (action === "list") return { panes: [...this.panes.values()].map(p => ({ ...p, focused: p.pane_id === this.focus })) };
+      if (action === "swap") {
+        const source = opt("--source-pane"), target = opt("--target-pane");
+        const tab = String(this.panes.get(source)!.tab_id);
+        if (this.swapChangedFalse) return { swap: { changed: false, reason: "cross_tab", source_pane_id: source, target_pane_id: target, focused_pane_id: this.focus, layout: this.layout(tab) } };
+        const walk = (n: Node): Node => "pane" in n ? { pane: n.pane === source ? target : n.pane === target ? source : n.pane } : { ...n, left: walk(n.left), right: walk(n.right) };
+        this.tabs.set(tab, walk(this.tabs.get(tab)!)); this.focus = source; this.focusHistory.push(source);
+        const error = this.afterError?.(args); if (error) throw error;
+        return { swap: { changed: true, source_pane_id: source, target_pane_id: target, focused_pane_id: this.focus, layout: this.layout(tab) } };
+      }
+      if (action === "process-info") {
+        const paneId = opt("--pane"), query = (this.processInfoQueries.get(paneId) ?? 0) + 1;
+        this.processInfoQueries.set(paneId, query);
+        const info = this.processInfo?.(paneId, query) ?? { shell_pid: 1, foreground_process_group_id: 1, foreground_processes: [{ pid: 1, name: "bash", argv0: "/bin/bash", argv: ["/bin/bash"] }] };
+        return { process_info: { pane_id: paneId, ...structuredClone(info) } };
+      }
       if (action === "current" || action === "get") {
         const p = this.panes.get(action === "get" ? id : args.includes("--current") ? "principal" : opt("--pane"));
         if (!p) throw new HerdrError("Pane closed", "pane_not_found");
-        return { pane: { ...p } };
+        return { pane: { ...p, focused: p.pane_id === this.focus } };
+      }
+      if (action === "neighbor" || action === "focus") {
+        const source = opt("--pane"), direction = opt("--direction");
+        const data = this.layout(String(this.panes.get(source)!.tab_id));
+        const rect = data.panes.find(p => p.pane_id === source)!.rect;
+        const neighbor = data.panes.find(p => {
+          const r = p.rect;
+          const verticalOverlap = r.y < rect.y + rect.height && rect.y < r.y + r.height;
+          const horizontalOverlap = r.x < rect.x + rect.width && rect.x < r.x + r.width;
+          return direction === "right" ? verticalOverlap && r.x === rect.x + rect.width :
+            direction === "left" ? verticalOverlap && r.x + r.width === rect.x :
+            direction === "down" ? horizontalOverlap && r.y === rect.y + rect.height :
+            horizontalOverlap && r.y + r.height === rect.y;
+        });
+        if (action === "focus" && neighbor) { this.focus = neighbor.pane_id; this.focusHistory.push(this.focus); }
+        return { neighbor: { neighbor_pane_id: neighbor?.pane_id } };
       }
       if (action === "layout") return { layout: this.layout(String(this.panes.get(opt("--pane"))!.tab_id)) };
       if (action === "split") {
         const target = this.panes.get(id)!, tab = String(target.tab_id), p = this.newPane(tab, env);
         this.tabs.set(tab, this.insert(this.tabs.get(tab)!, id, String(p.pane_id), opt("--direction"), Number(opt("--ratio"))));
+        const error = this.afterError?.(args); if (error) throw error;
         return { pane: { ...p } };
       }
       if (action === "move") {
@@ -75,6 +137,7 @@ export class Fake implements Control {
         const tab = args.includes("--new-tab") ? "stage-" + ++this.count : opt("--tab");
         if (tab === oldTab) return { move_result: { changed: false, reason: "same_tab" } };
         const root = this.remove(this.tabs.get(oldTab)!, id);
+        if (this.focus === id) this.focus = oldTab === "original" ? "principal" : "";
         if (root) this.tabs.set(oldTab, root); else this.tabs.delete(oldTab);
         this.tabs.set(tab, this.tabs.has(tab) ? this.insert(this.tabs.get(tab)!, opt("--target-pane"), id, opt("--split"), Number(opt("--ratio"))) : { pane: id });
         p.tab_id = tab;
@@ -85,7 +148,10 @@ export class Fake implements Control {
         if (!p) throw new HerdrError("Pane absent", "pane_not_found");
         const tab = String(p.tab_id), root = this.remove(this.tabs.get(tab)!, id);
         if (root) this.tabs.set(tab, root); else this.tabs.delete(tab);
-        this.panes.delete(id); return {};
+        this.panes.delete(id);
+        if (this.focus === id) this.focus = "principal";
+        const error = this.afterError?.(args); if (error) throw error;
+        return {};
       }
     }
     if (group === "agent") {
@@ -106,6 +172,7 @@ export class Fake implements Control {
       if (!a) throw new HerdrError("Agent absent", "agent_not_found");
       const p = this.panes.get(a.pane)!;
       if (action === "get") return { agent: { ...p } };
+      if (action === "focus") { this.focus = a.pane; return {}; }
       if (action === "prompt") {
         a.prompt = args[3]; p.agent_status = "working";
         await new Promise<void>((resolve, reject) => {
@@ -149,7 +216,7 @@ export class Fake implements Control {
   }
   block(name: string) { const a = this.agents.get(name)!; this.panes.get(a.pane)!.agent_status = "blocked"; a.resolve?.(); }
 }
-export async function eventually(check: () => boolean, timeout = 3000) {
+export async function eventually(check: () => boolean, timeout = 10000) {
   const end = Date.now() + timeout;
   while (!check()) {
     if (Date.now() > end) throw new Error("Condition did not settle");

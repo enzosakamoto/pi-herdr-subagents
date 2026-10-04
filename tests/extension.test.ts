@@ -47,8 +47,12 @@ async function setup(t: test.TestContext) {
   return { root, cwd, agentDir, fake, session, handlers, sent, ctx, run, tool };
 }
 
-test("pi lifecycle: deferred follow-up admission gates closure; one-time usage and branch reconciliation", async t => {
+test("pi lifecycle with user pane: deferred closure, one-time usage and branch reconciliation", async t => {
   const { fake, session, handlers, sent, ctx, run } = await setup(t);
+  const user = fake.newPane("original"), userId = String(user.pane_id);
+  fake.tabs.set("original", { direction: "right", ratio: 0.2, left: { pane: userId }, right: fake.tabs.get("original")! });
+  fake.focus = userId;
+  const userBefore = fake.layout("original").panes.find(p => p.pane_id === userId)!;
   const spawn = await run({ action: "spawn", task: "investigate without writing" });
   assert.equal(spawn.task.model, "test/model"); assert.equal(spawn.task.tier, "medium"); assert.equal(spawn.task.modelSource, "inherited");
   assert.equal(spawn.task.thinking, "high", "no configuration inherits thinking");
@@ -78,6 +82,10 @@ test("pi lifecycle: deferred follow-up admission gates closure; one-time usage a
   assert.deepEqual((await run({ action: "list" })).tasks, [], "abandoned branch tasks are not adopted");
   const filtered = await handlers.get("context")!({ messages: [{ role: "custom", ...message }] }, ctx);
   assert.equal(filtered.messages.length, 0, "stale outbox content does not enter another branch context");
+  assert.deepEqual(fake.layout("original").panes.find(p => p.pane_id === userId), userBefore);
+  assert.equal(fake.panes.get(userId)?.terminal_id, user.terminal_id);
+  assert.equal(fake.focus, userId);
+  assert.equal(fake.calls.filter(a => a[1] === "close" && a[2] === userId).length, 0);
 });
 
 test("configured tiers and explicit overrides are snapshotted concurrently and survive reload", async t => {
