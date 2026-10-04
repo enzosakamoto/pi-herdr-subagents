@@ -7,12 +7,15 @@ import { Fake, eventually } from "./fake.ts";
 import { paneRef } from "../src/layout.ts";
 import { HerdrError } from "../src/herdr.ts";
 import { Tasks, finished, type Task } from "../src/tasks.ts";
+import type { LayoutState } from "../src/layout-state.ts";
+import { columns, snapshot } from "../src/layout-geometry.ts";
 
 async function setup(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "hs-region-tasks-")), fake = new Fake();
-  const records: Task[] = [], notifications: { id: string; attention: boolean }[] = [];
+  const records: Task[] = [], notifications: { id: string; attention: boolean }[] = [], layouts: LayoutState[] = [];
   const hooks = {
     persist: async (task: Task) => { records.push(task); },
+    persistLayout: async (state: LayoutState) => { layouts.push(state); },
     notify: async (task: Task, attention: boolean) => { notifications.push({ id: task.taskId, attention }); }
   };
   const managers: Tasks[] = [];
@@ -25,7 +28,7 @@ async function setup(t: test.TestContext) {
   const manager = create();
   const restore = async (tasks: Task[]) => {
     const restored = create();
-    await restored.restore(tasks.map(task => records.filter(r => r.taskId === task.taskId).at(-1)!));
+    await restored.restore(tasks.map(task => records.filter(r => r.taskId === task.taskId).at(-1)!), layouts.at(-1) ?? null);
     return restored;
   };
   return { fake, manager, restore, notifications };
@@ -57,28 +60,31 @@ test("six children with an external pane survive reload and clean up without ado
   assert.equal(notifications.filter(n => !n.attention).length, 6);
   assert.equal(fake.calls.filter(a => ["split", "move", "close", "send-keys"].includes(a[1]) && a[2] === user.id).length, 0);
 });
-test("reload reconciles owned same-tab helpers after failed compaction without touching external panes", async t => {
+test("reload reconciles local ratio changes after failed compaction without touching external panes", async t => {
   const { fake, manager, restore } = await setup(t);
   const user = userSibling(fake), before = user.snapshot();
-  const tasks = await Promise.all([manager.spawn("A"), manager.spawn("B"), manager.spawn("C")]);
+  const tasks = await Promise.all(["A", "B", "C", "D", "E"].map(name => manager.spawn(name)));
   await eventually(() => tasks.every(task => !!fake.agents.get(task.agentName)?.prompt));
-  fake.error = args => args[1] === "swap" ? new HerdrError("assembly failed", "swap_busy") : undefined;
-  await fake.complete(tasks[2].agentName);
-  await eventually(() => manager.task(tasks[2].taskId).state === "cleanup_pending");
-  assert.equal(manager.task(tasks[2].taskId).pane, undefined);
+  const shape = columns(snapshot(fake.layout("original")).tree, "principal", tasks.map(t => manager.task(t.taskId).pane!.paneId));
+  const pane = shape.columns.find(c => c.ids.length === 3)!.ids.at(-1)!;
+  const completed = tasks.find(t => manager.task(t.taskId).pane!.paneId === pane)!, survivors = tasks.filter(t => t !== completed);
+  fake.error = args => args[1] === "set_split_ratio" ? new HerdrError("ratio change failed", "layout_busy") : undefined;
+  await fake.complete(completed.agentName);
+  await eventually(() => manager.task(completed.taskId).state === "cleanup_pending");
+  assert.equal(manager.task(completed.taskId).pane, undefined);
   assert.ok(manager.layout.pending);
-  assert.ok(tasks.slice(0, 2).every(task => manager.task(task.taskId).pane?.tabId === "original"));
+  assert.ok(survivors.every(task => manager.task(task.taskId).pane?.tabId === "original"));
   await manager.stop(); fake.error = undefined;
   const restored = await restore(tasks);
-  await eventually(() => finished(restored.task(tasks[2].taskId)) && tasks.slice(0, 2).every(task => restored.task(task.taskId).pane?.tabId === "original"));
+  await eventually(() => finished(restored.task(completed.taskId)) && survivors.every(task => restored.task(task.taskId).pane?.tabId === "original"));
   assert.deepEqual(user.snapshot(), before); assert.equal(fake.focus, user.id);
-  for (const task of tasks.slice(0, 2)) {
+  for (const task of survivors) {
     await fake.complete(task.agentName);
     await eventually(() => finished(restored.task(task.taskId)));
   }
   assert.deepEqual(user.snapshot(), before); assert.equal(fake.panes.size, 2); assert.equal(fake.tabs.size, 1);
-  assert.equal(fake.calls.filter(a => a[1] === "start").length, 3);
-  assert.equal(fake.calls.filter(a => a[1] === "prompt").length, 3);
+  assert.equal(fake.calls.filter(a => a[1] === "start").length, 5);
+  assert.equal(fake.calls.filter(a => a[1] === "prompt").length, 5);
 });
 test("user insertion inside the owned subtree retains completed result and all panes", async t => {
   const { fake, manager } = await setup(t);

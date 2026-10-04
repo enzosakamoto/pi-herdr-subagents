@@ -1,6 +1,6 @@
 import { type Control, HerdrError, object, string } from "./herdr.ts";
-import { snapshot, region, leaves, equalTree, insert, swap, remove, settled, operations, preflight, minimum, type Snapshot, type Tree, type Operation } from "./layout-geometry.ts";
-import { checkedState, sameRef, occupant, type FocusRef, type CloseFocusState, type LayoutRecord, type LayoutState, type LayoutStore } from "./layout-state.ts";
+import { snapshot, region, leaves, equalTree, apply, plan, preflight, minimum, type Snapshot, type Operation } from "./layout-geometry.ts";
+import { checkedState, journalPlan, sameRef, occupant, type FocusRef, type CloseFocusState, type LayoutRecord, type LayoutState, type LayoutStore } from "./layout-state.ts";
 
 export interface PaneRef {
   paneId: string; terminalId: string; tabId: string; workspaceId: string;
@@ -36,10 +36,7 @@ export class Layout {
   get pending() { return this.record !== null; }
   get needsRecovery() { return this.pending && this.active === 0; }
   get state(): LayoutState | undefined { return this.record ? { transactionId: this.record.id, record: structuredClone(this.record) } : undefined; }
-  get reservedPane() {
-    const t = this.record;
-    return t && t.workers.length < t.count ? t.slots[t.count - 1] ?? undefined : undefined;
-  }
+  get reservedPane() { return this.record?.reserve; }
   get reservedTaskId() { return this.record?.newTaskId; }
   load(state: LayoutState | null) {
     this.record = state === null ? null : checkedState(state, this.principal, this.store.owner, this.store.taskIds()).record;
@@ -80,8 +77,9 @@ export class Layout {
       await this.validate(ref);
     }
     const known = new Map(refs.map(r => [r.paneId, r]));
-    for (const ref of this.record?.slots ?? []) if (ref && s.panes.has(ref.paneId) && !known.has(ref.paneId)) {
-      await this.validate(ref); known.set(ref.paneId, ref);
+    const reserve = this.record?.reserve;
+    if (reserve && s.panes.has(reserve.paneId) && !known.has(reserve.paneId)) {
+      await this.validate(reserve); known.set(reserve.paneId, reserve);
     }
     region(s.tree, [main.paneId, ...known.keys()], s.area);
     return s;
@@ -185,27 +183,18 @@ export class Layout {
     if (!restored || (await this.focused())?.paneId !== t.focus.paneId) throw new Error("Could not restore initial focus after same-tab layout.");
     t.lastFocus = t.focus.paneId; await this.save();
   }
-  private async begin(refs: PaneRef[], count: number, cwd: string, env: Record<string, string>) {
+  private async begin(refs: PaneRef[], mode: "add" | "compact", cwd: string, env: Record<string, string>) {
     if (this.pending) throw new Error("Layout transaction pending; reconcile with status before another spawn.");
-    const s = await this.checkTab(refs);
-    preflight(s, this.principal.paneId, refs.map(r => r.paneId), count);
+    const s = await this.checkTab(refs), ids = refs.map(r => r.paneId);
+    const ops = plan(s.tree, this.principal.paneId, ids, mode);
+    preflight(s.tree, s.area, ops, [this.principal.paneId, ...ids, ...ops.filter(o => o.kind === "split").map(o => o.pane)]);
     let newTaskId: string | undefined;
     if (env.PI_HERDR_SUBAGENT) newTaskId = string(object(JSON.parse(env.PI_HERDR_SUBAGENT), "child marker").taskId, "taskId");
-    const taskIds = this.store.tasksFor?.(refs.map(r => r.paneId)) ?? this.store.taskIds();
+    const taskIds = [...(this.store.tasksFor?.(ids) ?? this.store.taskIds())];
     if (newTaskId && !taskIds.includes(newTaskId)) taskIds.push(newTaskId);
-    this.record = { version: 1, id: crypto.randomUUID(), owner: this.store.owner, principal: { ...this.principal }, taskIds,
-      workers: structuredClone(refs), count, cwd, env, newTaskId, slots: Array(count).fill(null), next: 0, baseTree: s.tree, tree: s.tree, focus: await this.focused() };
+    this.record = { version: 2, id: crypto.randomUUID(), owner: this.store.owner, principal: { ...this.principal }, taskIds,
+      workers: structuredClone(refs), mode, cwd, env, newTaskId, next: 0, baseTree: s.tree, tree: s.tree, focus: await this.focused() };
     await this.save();
-  }
-  private slot(t: LayoutRecord, index: number) {
-    const ref = t.slots[index]; if (!ref) throw new Error("Missing owned layout slot."); return ref;
-  }
-  private after(t: LayoutRecord, op: Operation): Tree | undefined {
-    if (op.kind === "split") {
-      const ref = t.slots[op.slot];
-      return ref ? insert(t.tree, op.target === "principal" ? this.principal.paneId : this.slot(t, op.target).paneId, ref.paneId, op.direction, op.ratio) : undefined;
-    }
-    return op.kind === "swap" ? swap(t.tree, t.workers[op.worker].paneId, this.slot(t, op.slot).paneId) : remove(t.tree, this.slot(t, op.slot).paneId);
   }
   private async proof(t: LayoutRecord, refs: PaneRef[]) {
     for (const worker of t.workers) {
@@ -213,94 +202,70 @@ export class Layout {
       if (!owned || worker.agentName !== owned.agentName || worker.sessionId !== owned.sessionId || worker.sessionPath !== owned.sessionPath)
         throw new Error("Layout worker identity not owned by the active task branch.");
     }
-    const s = await this.checkTab(refs);
-    const expected = t.intent?.after;
+    const s = await this.checkTab(refs), expected = t.intent?.after;
+    if (t.reserve && !s.panes.has(t.reserve.paneId)) throw new Error("Recorded reservation placement is unproven; no task attachment allowed.");
     if (!equalTree(s.tree, t.tree) && (!expected || !equalTree(s.tree, expected))) throw new Error("Layout topology changed during transaction; refusing unowned/uncertain panes.");
-    const ids = [this.principal.paneId, ...t.workers.map(r => r.paneId), ...t.slots.filter((r): r is PaneRef => !!r && s.panes.has(r.paneId)).map(r => r.paneId)];
-    minimum(s.tree, s.area, [...new Set(ids)]);
+    const ids = [this.principal.paneId, ...t.workers.map(r => r.paneId), ...(t.reserve && s.panes.has(t.reserve.paneId) ? [t.reserve.paneId] : [])];
+    minimum(s.tree, s.area, ids);
     return s;
   }
-  private async confirm(t: LayoutRecord, refs: PaneRef[], op: Operation) {
+  private async confirm(t: LayoutRecord, refs: PaneRef[]) {
     const s = await this.proof(t, refs), i = t.intent!;
     if (i.after && equalTree(s.tree, i.after)) {
       if (i.rejected) throw new Error("Topology changed after a rejected operation; intervention required.");
-      if (op.kind === "close") {
-        try { await this.cli.json(["pane", "get", this.slot(t, op.slot).paneId]); throw new Error("Closed auxiliary still exists outside its recorded region."); }
-        catch (e) { if (!(e instanceof HerdrError) || e.code !== "pane_not_found") throw e; }
-      }
-      if (op.kind === "swap" && (await this.focused())?.paneId === t.workers[op.worker].paneId) t.lastFocus = t.workers[op.worker].paneId;
       t.tree = i.after; t.next++; delete t.intent; await this.save(); return true;
     }
     if (!i.rejected) throw new Error("Uncertain layout operation has no confirmed result; no automatic resend or pane adoption. Intervention required.");
     delete t.intent; await this.save(); return false;
   }
   private async execute(t: LayoutRecord, refs: PaneRef[], op: Operation, own?: (r: PaneRef) => Promise<void>) {
-    const s = await this.proof(t, refs);
-    preflight(s, this.principal.paneId, t.workers.map(r => r.paneId), t.count, t.next, t.slots.map(r => r?.paneId));
+    const s = await this.proof(t, refs), ops = journalPlan(t);
+    preflight(s.tree, s.area, ops.slice(t.next), [this.principal.paneId, ...t.workers.map(r => r.paneId), ...ops.filter(o => o.kind === "split").map(o => o.pane)]);
     await this.checkFocus(t);
-    if (op.kind === "split" && op.target !== "principal") await this.awaitShell(this.slot(t, op.target));
-    if (op.kind === "swap") { await this.validate(t.workers[op.worker]); await this.awaitShell(this.slot(t, op.slot)); }
-    if (op.kind === "close") await this.awaitShell(this.slot(t, op.slot));
-    t.intent = { before: t.tree, after: this.after(t, op) }; await this.save();
-    let sent = false;
+    t.intent = { before: t.tree, after: op.kind === "split" ? undefined : apply(t.tree, op) }; await this.save();
+    let sent = false, acknowledged = false;
     try {
-      // Persistence is asynchronous: recheck the *before* map before sending.
-      // A coincidentally matching external swap must not be swapped back.
       const before = await this.proof(t, refs);
       if (!equalTree(before.tree, t.tree)) throw new Error("Layout changed before the recorded command was sent.");
       await this.checkFocus(t);
-      if (op.kind === "close") await this.awaitShell(this.slot(t, op.slot));
       sent = true;
       if (op.kind === "split") {
-        const target = op.target === "principal" ? this.principal : this.slot(t, op.target);
-        const env = t.workers.length < t.count && op.slot === t.count - 1 ? t.env : {};
-        const args = ["pane", "split", target.paneId, "--direction", op.direction, "--ratio", String(op.ratio), "--cwd", t.cwd, "--no-focus",
-          ...Object.entries(env).flatMap(([k, v]) => ["--env", k + "=" + v])];
-        const ref = paneRef((await this.cli.json(args)).pane);
-        if (ref.tabId !== this.principal.tabId || ref.workspaceId !== this.principal.workspaceId || leaves(t.tree).includes(ref.paneId) || t.slots.some(p => p?.paneId === ref.paneId))
-          throw new Error("Split did not return a fresh shell in the principal tab.");
-        t.slots[op.slot] = ref; t.intent.after = this.after(t, op); await this.save();
+        const args = ["pane", "split", op.target, "--direction", op.direction, "--ratio", String(op.ratio), "--cwd", t.cwd, "--no-focus",
+          ...Object.entries(t.env).flatMap(([k, v]) => ["--env", k + "=" + v])];
+        const result = await this.cli.json(args); acknowledged = true;
+        const ref = paneRef(result.pane);
+        if (ref.tabId !== this.principal.tabId || ref.workspaceId !== this.principal.workspaceId || leaves(t.tree).includes(ref.paneId))
+          throw new HerdrError("Split did not return a fresh shell in the principal tab.", "invalid_response", true);
+        t.reserve = ref; t.intent.after = apply(t.tree, { ...op, pane: ref.paneId }); await this.save();
+        const placed = await this.proof(t, refs);
+        if (!equalTree(placed.tree, t.intent.after)) throw new Error("Returned reservation placement is unproven; no task attachment allowed.");
         await this.awaitShell(ref); await this.save();
-        if (t.workers.length < t.count && op.slot === t.count - 1 && own) await own(ref);
-      } else if (op.kind === "swap") {
-        const source = t.workers[op.worker], target = this.slot(t, op.slot);
-        const r = object((await this.cli.json(["pane", "swap", "--source-pane", source.paneId, "--target-pane", target.paneId])).swap, "swap");
-        if (r.changed !== true) throw new HerdrError("Swap did not apply: " + String(r.reason), "swap_rejected");
-        t.lastFocus = source.paneId; await this.save();
-        if (r.source_pane_id !== source.paneId || r.target_pane_id !== target.paneId || !equalTree(snapshot(r.layout).tree, t.intent.after!))
-          throw new HerdrError("Unexpected swap response; reconcile before control.", "invalid_response", true);
-      } else await this.cli.json(["pane", "close", this.slot(t, op.slot).paneId]);
+        if (own) await own(ref);
+      } else { await this.cli.setSplitRatio(this.principal.tabId, op.path, op.ratio); acknowledged = true; }
     } catch (e) {
-      if (!sent || rejected(e)) { t.intent.rejected = true; await this.save(); }
+      if (!sent || !acknowledged && rejected(e)) { t.intent.rejected = true; await this.save(); }
       throw e;
     }
-    await this.confirm(t, refs, op);
+    await this.confirm(t, refs);
   }
   private async run(refs: PaneRef[], own?: (r: PaneRef) => Promise<void>) {
     const t = this.record!;
     try {
-      const ops = operations(t.count, t.workers.length);
-      while (t.next < ops.length) {
-        const op = ops[t.next];
-        if (t.intent && await this.confirm(t, refs, op)) continue;
+      if (t.reserve && own) { await this.proof(t, refs); await own(t.reserve); }
+      while (t.next < journalPlan(t).length) {
+        const op = journalPlan(t)[t.next];
+        if (t.intent && await this.confirm(t, refs)) continue;
         await this.execute(t, refs, op, own);
       }
       const s = await this.proof(t, refs);
-      const children = [...t.workers.map(r => r.paneId), ...(t.workers.length < t.count ? [this.slot(t, t.count - 1).paneId] : [])];
-      if (!equalTree(region(s.tree, [this.principal.paneId, ...children], s.area).tree, settled(this.principal.paneId, children)))
-        throw new Error("Same-tab layout did not settle; journal retained.");
-      await this.restoreFocus(t);
+      const children = [...t.workers.map(r => r.paneId), ...(t.reserve ? [t.reserve.paneId] : [])];
+      if (plan(s.tree, this.principal.paneId, children, "compact").length) throw new Error("Incremental layout did not settle; journal retained.");
       await this.store.persist({ transactionId: t.id, record: null }); this.record = null;
       await this.changed();
     } catch (e) {
-      // A lost acknowledgement may still have a provable applied result. Observe
-      // it (never resend), then restore the original focus before reporting failure.
       try {
-        if (t.intent?.after) {
-          const s = await this.proof(t, refs);
-          if (equalTree(s.tree, t.intent.after)) await this.confirm(t, refs, operations(t.count, t.workers.length)[t.next]);
-        }
-        await this.restoreFocus(t); await this.save();
+        if (t.intent?.after && equalTree((await this.proof(t, refs)).tree, t.intent.after)) await this.confirm(t, refs);
+        await this.save();
       } catch { /* Preserve the original failure and journal. */ }
       throw e;
     }
@@ -308,23 +273,24 @@ export class Layout {
   async recover(refs: PaneRef[], resetFocus = false, own?: (ref: PaneRef) => Promise<void>) {
     if (!this.record) return;
     const t = this.record;
-    if (t.workers.length < t.count && !own && !refs.some(r => t.slots[t.count - 1] && sameRef(r, t.slots[t.count - 1]!)))
+    if (t.mode === "add" && !own && !refs.some(r => t.reserve && sameRef(r, t.reserve)))
       throw new Error("New reservation needs an active-branch ownership callback before layout recovery.");
     this.active++;
     try {
-      if (resetFocus) { this.record.focus = await this.focused(); delete this.record.lastFocus; delete this.record.focusChanged; await this.save(); }
+      if (resetFocus) { t.focus = await this.focused(); delete t.lastFocus; delete t.focusChanged; await this.save(); }
       await this.run(refs, own);
-      return t.workers.length < t.count ? this.slot(t, t.count - 1) : undefined;
+      return t.reserve;
     } finally { this.active--; }
   }
   async add(refs: PaneRef[], cwd: string, env: Record<string, string>, own: (ref: PaneRef) => Promise<void>): Promise<PaneRef> {
     this.active++;
     try {
       refs = [...refs];
-      await this.begin(refs, refs.length + 1, cwd, env);
+      await this.begin(refs, "add", cwd, env);
       const t = this.record!;
       await this.run(refs, own);
-      return this.slot(t, t.count - 1);
+      if (!t.reserve) throw new Error("Missing confirmed child reservation.");
+      return t.reserve;
     } finally { this.active--; }
   }
   async compact(refs: PaneRef[]) {
@@ -332,9 +298,8 @@ export class Layout {
     try {
       if (this.pending) { await this.recover(refs); return; }
       const s = await this.checkTab(refs);
-      const local = region(s.tree, [this.principal.paneId, ...refs.map(r => r.paneId)], s.area);
-      if (equalTree(local.tree, settled(this.principal.paneId, refs.map(r => r.paneId)))) return;
-      await this.begin(refs, refs.length, this.store.cwd ?? process.cwd(), {}); await this.run(refs);
+      if (!plan(s.tree, this.principal.paneId, refs.map(r => r.paneId), "compact").length) return;
+      await this.begin(refs, "compact", this.store.cwd ?? process.cwd(), {}); await this.run(refs);
     } finally { this.active--; }
   }
   async restoreClosedFocus(state: CloseFocusState | undefined, closed: PaneRef) {
@@ -347,16 +312,31 @@ export class Layout {
     await this.restoreFocus({ focus: state.target, lastFocus: state.last.paneId, workers: [] });
   }
   async close(ref: PaneRef, survivors: PaneRef[], closed: () => Promise<void> = async () => {},
-      saveFocus: (state: CloseFocusState | undefined) => Promise<void> = async () => {}) {
+      saveFocus: (state: CloseFocusState | undefined) => Promise<void> = async () => {},
+      saveClose: (attempted: boolean) => Promise<void> = async () => {}) {
     if (this.pending) await this.recover([ref, ...survivors]);
-    await this.checkTab([ref, ...survivors]); await this.validate(ref);
+    const s = await this.checkTab([ref, ...survivors]);
+    plan(s.tree, this.principal.paneId, [ref, ...survivors].map(p => p.paneId), "compact");
+    await this.validate(ref);
     const initial = await this.focused();
     const main = object((await this.cli.json(["pane", "get", this.principal.paneId])).pane, "principal focus");
     const focus: CloseFocusState | undefined = initial?.paneId === ref.paneId ?
       { version: 1, initial, target: { ...this.principal, occupant: occupant(main) } } : undefined;
     await saveFocus(focus); // Task persistence precedes the completed-child close.
-    await this.cli.json(["pane", "close", ref.paneId]);
-    if (focus) {
+    await saveClose(true);
+    let sent = false, restore = false;
+    try {
+      const before = await this.checkTab([ref, ...survivors]);
+      if (!equalTree(s.tree, before.tree)) throw new Error("Layout changed before completed-child close; reconcile first.");
+      const occupant = await this.validate(ref);
+      if (ref.agentName && !["idle", "done"].includes(String(occupant.agent_status))) throw new Error("Cannot close non-quiescent child.");
+      const selected = await this.focused();
+      restore = !!focus && !!selected && sameRef(selected, focus.initial) && selected.occupant === focus.initial.occupant;
+      sent = true; await this.cli.json(["pane", "close", ref.paneId]);
+    } catch (e) { if (!sent || rejected(e)) await saveClose(false); throw e; }
+    try { await this.cli.json(["pane", "get", ref.paneId]); throw new Error("Closed child still exists; reconcile before another close."); }
+    catch (e) { if (!(e instanceof HerdrError) || e.code !== "pane_not_found" || e.uncertain) throw e; }
+    if (focus && restore) {
       const current = await this.focused();
       // Capture the acknowledged native selection. Any later observed change
       // prevents restoration; no focus CAS is available across this boundary.

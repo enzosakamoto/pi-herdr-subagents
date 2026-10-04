@@ -60,69 +60,127 @@ export function snapshot(raw: unknown): Snapshot {
   if (usedPanes.size !== panes.size || usedSplits.size !== splits.length) throw new Error("Inconsistent Herdr layout coverage.");
   return { tabId: string(l.tab_id, "layout tab_id"), workspaceId: string(l.workspace_id, "layout workspace_id"), zoomed: l.zoomed, area, panes, tree };
 }
-export function region(t: Tree, ids: string[], area: Rect): { tree: Tree; rect: Rect } {
+export function region(t: Tree, ids: string[], area: Rect): { tree: Tree; rect: Rect; path: boolean[] } {
   const wanted = new Set(ids), present = new Set(leaves(t));
   if (wanted.size !== ids.length || ids.some(id => !present.has(id))) throw new Error("Owned pane missing/duplicated in Herdr layout.");
-  const find = (node: Tree, rect: Rect): { tree: Tree; rect: Rect } => {
+  const find = (node: Tree, rect: Rect, path: boolean[]): { tree: Tree; rect: Rect; path: boolean[] } => {
     const all = leaves(node);
-    if (all.length === wanted.size && all.every(id => wanted.has(id))) return { tree: node, rect };
+    if (all.length === wanted.size && all.every(id => wanted.has(id))) return { tree: node, rect, path };
     if (!("pane" in node)) {
       const [a, b] = splitRect(rect, node.direction, node.ratio);
-      if (ids.every(id => leaves(node.left).includes(id))) return find(node.left, a);
-      if (ids.every(id => leaves(node.right).includes(id))) return find(node.right, b);
+      if (ids.every(id => leaves(node.left).includes(id))) return find(node.left, a, [...path, false]);
+      if (ids.every(id => leaves(node.right).includes(id))) return find(node.right, b, [...path, true]);
     }
     throw new Error("Principal/children region is not a dedicated BSP subtree; refusing user pane control.");
   };
-  return find(t, area);
+  return find(t, area, []);
 }
 export function insert(t: Tree, target: string, id: string, direction: "right" | "down", ratio: number): Tree {
   if ("pane" in t) return t.pane === target ? { direction, ratio: Math.fround(ratio), left: t, right: { pane: id } } : t;
   return { ...t, left: insert(t.left, target, id, direction, ratio), right: insert(t.right, target, id, direction, ratio) };
-}
-export function swap(t: Tree, a: string, b: string): Tree {
-  if ("pane" in t) return { pane: t.pane === a ? b : t.pane === b ? a : t.pane };
-  return { ...t, left: swap(t.left, a, b), right: swap(t.right, a, b) };
 }
 export function remove(t: Tree, id: string): Tree | undefined {
   if ("pane" in t) return t.pane === id ? undefined : t;
   const a = remove(t.left, id), b = remove(t.right, id);
   return a && b ? { ...t, left: a, right: b } : a ?? b;
 }
-function rows(ids: string[]): Tree {
-  return ids.length === 1 ? { pane: ids[0] } : { direction: "down", ratio: Math.fround(1 / ids.length), left: { pane: ids[0] }, right: rows(ids.slice(1)) };
+export const NEW_PANE = "@new-child";
+export type Operation = { kind: "split"; target: string; pane: string; direction: "right" | "down"; ratio: number } |
+  { kind: "ratio"; path: boolean[]; ratio: number };
+export function at(t: Tree, path: boolean[]): Tree {
+  for (const side of path) {
+    if ("pane" in t) throw new Error("Invalid layout split path.");
+    t = side ? t.right : t.left;
+  }
+  return t;
 }
-export function settled(main: string, children: string[]): Tree {
-  if (!children.length) return { pane: main };
-  const right = children.length <= 3 ? rows(children) : { direction: "right" as const, ratio: 0.5, left: rows(children.slice(0, 3)), right: rows(children.slice(3)) };
-  return { direction: "right", ratio: 0.5, left: { pane: main }, right };
+export function apply(t: Tree, op: Operation): Tree {
+  if (op.kind === "split") {
+    if (!leaves(t).includes(op.target) || leaves(t).includes(op.pane)) throw new Error("Invalid fresh layout split.");
+    return insert(t, op.target, op.pane, op.direction, op.ratio);
+  }
+  const replace = (node: Tree, path: boolean[]): Tree => {
+    if ("pane" in node) throw new Error("Invalid layout split path.");
+    if (!path.length) return { ...node, ratio: Math.fround(op.ratio) };
+    return path[0] ? { ...node, right: replace(node.right, path.slice(1)) } : { ...node, left: replace(node.left, path.slice(1)) };
+  };
+  return replace(t, op.path);
 }
-export type Operation = { kind: "split"; slot: number; target: number | "principal"; direction: "right" | "down"; ratio: number } |
-  { kind: "swap"; worker: number; slot: number } | { kind: "close"; slot: number };
-export function operations(count: number, workers: number): Operation[] {
-  if (!Number.isInteger(count) || count < 1 || count > 6 || (workers !== count && workers !== count - 1)) throw new Error("Invalid layout child count.");
-  const ops: Operation[] = [{ kind: "split", slot: 0, target: "principal", direction: "right", ratio: 0.5 }];
-  if (count > 3) ops.push({ kind: "split", slot: 3, target: 0, direction: "right", ratio: 0.5 });
-  const columns = count > 3 ? [[0, 1, 2], Array.from({ length: count - 3 }, (_, i) => i + 3)] : [Array.from({ length: count }, (_, i) => i)];
-  for (const col of columns) for (let i = 1; i < col.length; i++) ops.push({ kind: "split", slot: col[i], target: col[i - 1], direction: "down", ratio: 1 / (col.length - i + 1) });
-  for (let i = 0; i < workers; i++) ops.push({ kind: "swap", worker: i, slot: i });
-  for (let i = 0; i < workers; i++) ops.push({ kind: "close", slot: i });
-  return ops;
+export function columns(t: Tree, main: string, children: string[]) {
+  const local = region(t, [main, ...children], { x: 0, y: 0, width: 100000, height: 100000 });
+  const cols: { tree: Tree; path: boolean[]; ids: string[] }[] = [], ratios: { path: boolean[]; ratio: number }[] = [];
+  const invalid = (): never => { throw new Error("Unsupported owned layout topology; reconcile manually."); };
+  const column = (node: Tree, path: boolean[]) => {
+    const vertical = (n: Tree): boolean => "pane" in n || n.direction === "down" && vertical(n.left) && vertical(n.right);
+    const ids = leaves(node);
+    if (!vertical(node) || ids.includes(main) || ids.length > 3) invalid();
+    cols.push({ tree: node, path, ids });
+  };
+  const n = local.tree, p = local.path;
+  if (!children.length) { if (!("pane" in n) || n.pane !== main) invalid(); }
+  else if (!("pane" in n) && n.direction === "right") {
+    if ("pane" in n.left && n.left.pane === main) {
+      ratios.push({ path: p, ratio: 0.5 });
+      const r = n.right;
+      if (!("pane" in r) && r.direction === "right") {
+        ratios.push({ path: [...p, true], ratio: 0.5 });
+        column(r.left, [...p, true, false]); column(r.right, [...p, true, true]);
+      } else column(r, [...p, true]);
+    } else {
+      const l = n.left;
+      if ("pane" in l || l.direction !== "right" || !("pane" in l.left) || l.left.pane !== main) return invalid();
+      ratios.push({ path: p, ratio: 0.75 }, { path: [...p, false], ratio: 2 / 3 });
+      column(l.right, [...p, false, true]); column(n.right, [...p, true]);
+    }
+  } else invalid();
+  return { columns: cols, ratios };
+}
+export function plan(base: Tree, main: string, children: string[], mode: "add" | "compact", pane = NEW_PANE): Operation[] {
+  if (children.length > 6 || mode === "add" && children.length >= 6) throw new Error("At most six layout children are allowed.");
+  const ops: Operation[] = []; let t = base;
+  const push = (op: Operation) => { ops.push(op); t = apply(t, op); };
+  const ratio = (path: boolean[], value: number) => {
+    const node = at(t, path);
+    if ("pane" in node) throw new Error("Invalid layout split path.");
+    if (Math.fround(node.ratio) !== Math.fround(value)) push({ kind: "ratio", path, ratio: Math.fround(value) });
+  };
+  const normalize = (ids: string[]) => {
+    const shape = columns(t, main, ids);
+    for (const r of shape.ratios) ratio(r.path, r.ratio);
+    const rows = (node: Tree, path: boolean[]) => {
+      if ("pane" in node) return;
+      ratio(path, leaves(node.left).length / leaves(node).length);
+      rows(node.left, [...path, false]); rows(node.right, [...path, true]);
+    };
+    for (const col of shape.columns) rows(col.tree, col.path);
+  };
+  normalize(children);
+  if (mode === "compact") return ops;
+  const shape = columns(t, main, children), cols = shape.columns;
+  if (!cols.length) push({ kind: "split", target: main, pane, direction: "right", ratio: 0.5 });
+  else if (cols.length === 1) {
+    if (cols[0].ids.length === 1) push({ kind: "split", target: cols[0].ids[0], pane, direction: "right", ratio: 0.5 });
+    else {
+      ratio(shape.ratios[0].path, 0.75);
+      push({ kind: "split", target: main, pane, direction: "right", ratio: Math.fround(2 / 3) });
+    }
+  } else {
+    const col = cols[0].ids.length <= cols[1].ids.length ? cols[0] : cols[1];
+    // Give the bottom pane the space for both rows before splitting it.
+    if (col.ids.length === 2) ratio(col.path, 1 / 3);
+    push({ kind: "split", target: col.ids.at(-1)!, pane, direction: "down", ratio: 0.5 });
+  }
+  normalize([...children, pane]); return ops;
 }
 export function minimum(tree: Tree, area: Rect, owned: string[]) {
   const map = cells(tree, area);
   if (owned.some(id => !map.has(id) || map.get(id)!.width < 3 || map.get(id)!.height < 3))
-    throw new Error("Principal region too small for a safe same-tab transition (minimum 3×3 cells per pane); enlarge it. No staging fallback.");
+    throw new Error("Principal region too small for a safe incremental transition (minimum 3×3 cells per pane); enlarge it. No staging fallback.");
 }
-export function preflight(s: Snapshot, main: string, workers: string[], count: number, next = 0, knownSlots: (string | undefined)[] = []) {
-  let t = s.tree;
-  const slots = Array.from({ length: count }, (_, i) => knownSlots[i] ?? "@slot:" + i);
-  const present = new Set(leaves(t));
-  const all = [main, ...workers, ...knownSlots.filter((id): id is string => !!id && present.has(id))];
-  minimum(t, s.area, all);
-  for (const op of operations(count, workers.length).slice(next)) {
-    if (op.kind === "split") { t = insert(t, op.target === "principal" ? main : slots[op.target], slots[op.slot], op.direction, op.ratio); all.push(slots[op.slot]); }
-    else if (op.kind === "swap") t = swap(t, workers[op.worker], slots[op.slot]);
-    else { t = remove(t, slots[op.slot])!; all.splice(all.indexOf(slots[op.slot]), 1); }
-    minimum(t, s.area, all);
+export function preflight(tree: Tree, area: Rect, ops: Operation[], owned: string[]) {
+  let t = tree;
+  for (let i = 0; i <= ops.length; i++) {
+    minimum(t, area, owned.filter(id => leaves(t).includes(id)));
+    if (i < ops.length) t = apply(t, ops[i]);
   }
 }

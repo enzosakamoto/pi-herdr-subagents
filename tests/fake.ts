@@ -56,6 +56,19 @@ export class Fake implements Control {
     walk(this.tabs.get(tab)!, this.area.x, this.area.y, this.area.width, this.area.height);
     return { tab_id: tab, workspace_id: "workspace", area: { ...this.area }, panes: result, splits, focused_pane_id: this.focus, zoomed: this.zoomed };
   }
+  async setSplitRatio(tabId: string, path: boolean[], ratio: number): Promise<Record<string, unknown>> {
+    const args = ["layout", "set_split_ratio", tabId, JSON.stringify(path), String(ratio)];
+    this.calls.push(args);
+    const error = this.error?.(args); if (error) throw error;
+    const replace = (node: Node, remaining: boolean[]): Node => {
+      if ("pane" in node) throw new HerdrError("Invalid split path", "invalid_split_path");
+      if (!remaining.length) return { ...node, ratio: Math.fround(ratio) };
+      return remaining[0] ? { ...node, right: replace(node.right, remaining.slice(1)) } : { ...node, left: replace(node.left, remaining.slice(1)) };
+    };
+    this.tabs.set(tabId, replace(this.tabs.get(tabId)!, path));
+    const after = this.afterError?.(args); if (after) throw after;
+    return { layout: this.layout(tabId) };
+  }
   async json(args: string[], signal?: AbortSignal): Promise<Record<string, unknown>> {
     this.calls.push(args);
     const error = this.error?.(args); if (error) throw error;

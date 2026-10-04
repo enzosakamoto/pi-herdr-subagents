@@ -2,7 +2,7 @@
 
 ## Objetivo e aprovação
 
-Substituir a reconstrução da grade em cada spawn/compactação por operações incrementais na região do principal. O usuário demonstrou a criação de seis panes e aprovou as regras de fechamento e de reabertura de uma coluna descritas abaixo. Autorizou registrar o desenho, implementar e criar panes para testes. Esta especificação escrita aguarda revisão antes da implementação.
+Substituir a reconstrução da grade em cada spawn/compactação por operações incrementais na região do principal. O usuário demonstrou a criação de seis panes e aprovou as regras de fechamento e de reabertura de uma coluna descritas abaixo. Autorizou registrar o desenho, implementar e criar panes para testes. Esta especificação escrita foi revisada e aprovada pelo usuário antes da implementação.
 
 Este desenho substitui o algoritmo e o formato estável de `2026-10-03-same-tab-layout-design.md`. Permanecem as regras de propriedade, sessão/ramo ativo, identidade de terminal/agente, entrega de resultados antes do fechamento, limite de seis filhos, ausência de filas/recursão e isolamento de panes externos.
 

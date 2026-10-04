@@ -44,8 +44,9 @@ for trivial or strictly sequential work.
 - Same cwd and final tab as the principal.
 - The tab must not be zoomed. Existing user panes are allowed; they are never adopted, moved or closed.
 - Layout proportions use only the invoking principal pane's available region, not the whole tab.
-- With 1–3 children: principal left 50% of that region, one child column right 50%.
-- With 4–6: principal left 50%, two child columns of 25%, at most three balanced rows each.
+- Principal left 50%; children share the right 50% in one or two columns, at most three balanced rows each.
+- The second child opens the second column; subsequent children append to the shorter column (tie: left).
+- Closing a child balances its column only. An empty column collapses; reopening beside a surviving stack creates the new column on its left.
 - After completion: persist the full result, deliver a task-tagged **follow-up**, then close
   only the matching owned pane and compact survivors. With no children, restore the principal
   to the whole local region, leaving external panes intact.
@@ -59,35 +60,35 @@ or a child is relocated outside it, layout control stops for reconciliation rath
 reorganizing user work. Pre-existing panes, even empty shells, are not reused automatically.
 Relative splits follow the current window/region size; dimensions are not frozen at first spawn.
 
-### Authorized BSP adaptation
+### Incremental BSP layout
 
-Layout changes use **same-tab auxiliary shells and explicit swaps**. Live children keep
-their pane, terminal, agent and session identities. No staging tabs, cross-tab moves,
-`layout.apply`, terminal recreation or worker restart. Auxiliary shells are not tasks
-and never receive pi launches or prompts; only proven owned shells are closed.
-Foreground shell PID/name/arguments are checked; unrecognized custom shells require
-intervention rather than being treated as safely idle. Short-lived foreground jobs or
-unavailable process metadata receive bounded waits; explicit identity changes still stop
-control. `status`/reload remove missing unstarted reservation links only after a definitive
-`pane_not_found`, without adopting replacements or physically closing other panes.
+Each spawn creates **exactly one child pane**, using a local split and precise ratio
+adjustments via Herdr's `layout.set_split_ratio` socket API. No auxiliary shells, swaps,
+staging tabs, cross-tab moves, `layout.apply`, terminal recreation or worker restarts.
+Live children retain their pane, terminal, agent and session identities and vertical order.
+The number of columns follows their history, not just the current child count.
 
-Geometry is transitional: the principal/new grid temporarily share the principal leaf
-before recovering their settled local 50/50 region. Preflight requires **3×3 cells per
-owned pane at every step**, including temporary slots. Enlarge the region if it fails;
-there is no staging fallback.
+To reopen a column beside a surviving stack, temporarily grow the principal to 75%,
+then split it at 2/3: settled widths are 50% principal, 25% new column, 25% existing column.
+The owned region remains a dedicated subtree even though its internal BSP shape changes.
+Preflight requires **3×3 cells per owned pane at every step**; enlarge the region if needed.
 
-Herdr 0.9.3 swaps **temporarily focus the surviving source child**. Initial focus is
-restored when its occupant remains valid and the current selection still matches an
-extension-caused effect. Observed external focus changes pause further mutations; no
-atomic focus guarantee is possible. Selected completed children fall back to the principal.
+Splits and ratio adjustments do not deliberately select children. Observed external focus
+changes pause further mutations; no atomic focus guarantee is possible. A selected
+completed child falls back to the principal only while the recorded close effect remains valid.
 
-A private, versioned transaction journal and branch entries support safe recovery.
-`status` reconciles proven state without relaunching agents or resending prompts.
-Unknown split IDs, unproven swap outcomes, changed occupants/topology and foreign branch
-journals are not adopted or blindly retried. Unstarted owned shell reservations can be
-cancelled explicitly. Legacy cross-tab children require manual reconciliation; existing
-`hs-staging` tabs/plugin sidebars are never automatically cleaned up.
-This same-tab implementation has deterministic tests, **not new live validation**.
+The newborn reservation must reach proven shell foreground before pi starts. Shell
+PID/name/arguments are checked; temporary jobs or unavailable metadata receive bounded
+waits, while explicit identity changes stop control. Splitting beside a working agent
+validates its identity, not shell readiness. `status`/reload remove missing unstarted
+reservation links only after definitive `pane_not_found`, without adopting replacements.
+
+A private v2 journal and active-branch entries support recovery without relaunching agents
+or resending prompts. Unknown split IDs, uncertain unapplied ratio/close operations and
+changed occupants/topology are not adopted or blindly retried. Cancel unstarted owned
+reservations explicitly. Pending v1 reconstruction journals and legacy cross-tab children
+require manual reconciliation; existing `hs-staging` tabs/plugin sidebars are never cleaned
+up automatically. See Verification for simulated and isolated live evidence.
 
 ## Requirements and installation
 
@@ -281,10 +282,13 @@ Development requires Node 24+ (native TypeScript tests) and npm:
 
 ```bash
 npm ci
-npm test
+env -u PI_HERDR_SUBAGENT npm test
 npm run check
 git diff --check
 ```
+
+Unset `PI_HERDR_SUBAGENT` when running the suite from a delegated child: principal-mode
+extension tests must not inherit the live child's marker or write its readiness receipts.
 
 Deterministic tests include all 720 deletion orders, independent observers,
 capacity, blocked/startup/cancellation failures, active branches, full responses,
@@ -293,9 +297,9 @@ follow-up admission, exactly-once accounting, resource discovery and tool schema
 includes external panes in all directions, the eight-pane reference layout, resizing,
 external/child focus and historical staging recovery.
 [Same-tab coverage](docs/superpowers/plans/2026-10-03-same-tab-layout-verification.md)
-adds durable recovery at every mutation, lost responses, minimum geometry, focus changes,
-plugin hooks and branch provenance. Same-tab splits/swaps/process continuity still require
-separately authorized live validation in an isolated environment.
+records the historical reconstruction algorithm. [Incremental coverage](docs/superpowers/plans/2026-10-04-incremental-layout-verification.md)
+checks ratio/split recovery, mixed birth/close histories, reopening, minimum geometry,
+focus preservation, plugin hooks and branch provenance without swaps or auxiliaries.
 Model-tier/thinking coverage includes config precedence/validation, null/off/omission,
 concurrent selections, legacy records and reloads, with temporary files and fake Herdr/model registries. Tier changes
 have no new live-model verification; textual guidance checks are not LLM behavioral evals.
@@ -304,16 +308,19 @@ Opt-in live tests require an **already running isolated named Herdr test server*
 They never start/stop/upgrade a server or use the implementation/reference tabs:
 
 ```bash
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session npm run test:live
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session npm run test:live-tasks
-HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session npm run test:live-extension
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session HERDR_TEST_SOCKET=/absolute/test/socket npm run test:live
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session HERDR_TEST_SOCKET=/absolute/test/socket npm run test:live-tasks
+HERDR_LIVE_TEST=1 HERDR_TEST_SESSION=your-test-session HERDR_TEST_SOCKET=/absolute/test/socket npm run test:live-extension
 ```
 
-The latter two make model calls. Test workspaces are owned/cleaned by the test; failed
+The explicit test socket must belong to the selected isolated session. The layout test
+starts idle pi TUIs without submitting prompts or making model calls; the latter two
+make model calls. Test workspaces are owned/cleaned by the test; failed
 runs retain panes/evidence for diagnosis. Live layout, two child TUI tasks, explicit Escape cancellation and a real
 principal receiving follow-ups/accounting passed. Reload/branch/block edge cases
 have deterministic coverage, not a claim of exhaustive live fault-injection coverage.
 
+[Incremental layout specification](docs/superpowers/specs/2026-10-04-incremental-layout-design.md) ·
 [Principal-region layout specification](docs/superpowers/specs/2026-10-03-principal-region-layout-design.md) ·
 [Thinking specification](docs/superpowers/specs/2026-10-03-tier-thinking-design.md) ·
 [Model-tier specification](docs/superpowers/specs/2026-10-03-model-tiers-design.md) ·

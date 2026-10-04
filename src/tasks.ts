@@ -13,7 +13,7 @@ export interface Task {
   agentName: string; sessionId: string; directory: string; pane?: PaneRef;
   model?: string; thinking?: string; tier?: Tier; modelSource?: ModelSource;
   submitted: boolean; cancelRequested: boolean; launchAttempted?: boolean; diagnostic?: string; outcome?: Outcome; resultPath?: string;
-  attentionSent?: boolean; notified?: boolean; closeFocus?: CloseFocusState;
+  attentionSent?: boolean; notified?: boolean; closeFocus?: CloseFocusState; closeAttempted?: boolean;
 }
 export interface Hooks {
   persist(task: Task): Promise<void>;
@@ -46,7 +46,8 @@ export class Tasks {
     this.root = resolve(root); this.defaults = defaults; this.hooks = hooks;
     this.cli = {
       json: (args, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.json(args, signal ?? this.controller.signal, timeout),
-      text: (args, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.text(args, signal ?? this.controller.signal, timeout)
+      text: (args, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.text(args, signal ?? this.controller.signal, timeout),
+      setSplitRatio: (tabId, path, ratio, signal, timeout) => this.controller.signal.aborted || signal?.aborted ? Promise.reject(new HerdrError("Observer stopped before request.", "observer_stopped")) : cli.setSplitRatio(tabId, path, ratio, signal ?? this.controller.signal, timeout)
     };
     this.layout = new Layout(this.cli, principal, async () => {
       for (const task of this.tasks.values()) if (task.pane) await this.save(task);
@@ -271,13 +272,15 @@ export class Tasks {
     if (this.layoutProblem) throw new Error(this.layoutProblem);
     await this.recoverLayout();
     const ref = task.pane;
+    if (task.closeAttempted) throw new Error("Previous child close is uncertain; reconcile its absence with status before any resend.");
     if (!ref.agentName && task.cancelRequested && !task.submitted) await this.layout.awaitShell(ref);
     else {
       const a = await this.layout.validate(ref);
       if (!["idle", "done"].includes(String(a.agent_status))) throw new Error("Cannot close non-quiescent child.");
     }
-    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; task.state = "collecting"; await this.save(task); },
-      async state => { task.closeFocus = state; await this.save(task); });
+    await this.layout.close(ref, this.ownRefs(task), async () => { delete task.pane; delete task.closeAttempted; task.state = "collecting"; await this.save(task); },
+      async state => { task.closeFocus = state; await this.save(task); },
+      async attempted => { task.closeAttempted = attempted || undefined; await this.save(task); });
     task.state = task.cancelRequested || task.outcome.stopReason === "aborted" ? "cancelled" : task.outcome.stopReason === "stop" ? "completed" : "failed";
     await this.save(task);
   }
@@ -293,8 +296,6 @@ export class Tasks {
     }
   }
   private async recoverLayout(resetFocus = false) {
-    const reserved = this.layout.reservedPane;
-    if (reserved) await this.ownReservation(reserved);
     await this.layout.recover(this.ownRefs(), resetFocus, ref => this.ownReservation(ref));
   }
   private async reconcileReservation(task: Task, includeStarting = false): Promise<boolean> {
@@ -327,15 +328,15 @@ export class Tasks {
       } catch {}
       this.tasks.set(task.taskId, task);
     }
-    let state = branchLayout;
+    let state = branchLayout ?? null;
     try {
-      if (state !== null) {
+      if (state?.record) {
         let disk: LayoutState | undefined;
         try { disk = await readJson<LayoutState>(join(this.root, "layout.json")); }
         catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
         // Disk progress/tombstones are eligible only for the transaction named
         // by this branch, never for an unrelated abandoned branch.
-        if (state === undefined || (state && disk?.transactionId === state.transactionId)) state = disk;
+        if (disk?.transactionId === state.transactionId) state = disk;
       }
       this.layout.load(state ?? null);
     } catch (e) { this.layoutProblem = diagnostic(e); return; }
@@ -416,8 +417,8 @@ export class Tasks {
           if (task.pane) {
             try { await this.layout.validate(task.pane); }
             catch (e) {
-              if (e instanceof HerdrError && e.code === "pane_not_found") {
-                await this.layout.restoreClosedFocus(task.closeFocus, task.pane); delete task.closeFocus; delete task.pane; await this.save(task);
+              if (e instanceof HerdrError && e.code === "pane_not_found" && !e.uncertain) {
+                await this.layout.restoreClosedFocus(task.closeFocus, task.pane); delete task.closeFocus; delete task.closeAttempted; delete task.pane; await this.save(task);
               } else throw e;
             }
           }
@@ -492,7 +493,8 @@ export class Tasks {
         task.resultPath = join(task.directory, "result.json"); await atomicJson(task.resultPath, task.outcome);
         task.state = "cancelled"; await this.save(task);
         if (!task.notified) { task.notified = (await this.hooks.notify(task, false)) !== false; await this.save(task); }
-        await this.cleanup(task);
+        try { await this.cleanup(task); }
+        catch (e) { task.state = "cleanup_pending"; task.diagnostic = diagnostic(e); await this.save(task); throw e; }
       });
       return view(task);
     }
@@ -513,7 +515,8 @@ export class Tasks {
         await atomicJson(task.resultPath, task.outcome);
         task.state = "cancelled"; await this.save(task);
         if (!task.notified) { task.notified = (await this.hooks.notify(task, false)) !== false; await this.save(task); }
-        await this.cleanup(task);
+        try { await this.cleanup(task); }
+        catch (e) { task.state = "cleanup_pending"; task.diagnostic = diagnostic(e); await this.save(task); throw e; }
       });
     } else if (await this.receipt(task)) await this.status(id);
     return view(task);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Fake } from "./fake.ts";
 import { HerdrError } from "../src/herdr.ts";
 import { Layout, paneRef, type PaneRef } from "../src/layout.ts";
+import { columns as layoutColumns, snapshot } from "../src/layout-geometry.ts";
 function setup() { const fake = new Fake(); const layout = new Layout(fake, paneRef(fake.panes.get("principal")), async () => {}); return { fake, layout }; }
 function check(fake: Fake, refs: PaneRef[]) {
   const data = fake.layout("original");
@@ -13,7 +14,7 @@ function check(fake: Fake, refs: PaneRef[]) {
   assert.ok(Math.abs(main.rect.width - (refs.length ? 101.5 : 203)) <= 1); assert.equal(main.rect.height, 57);
   const columns = new Map<number, number[]>();
   for (const p of panes.filter(p => p.pane_id !== "principal")) columns.set(p.rect.x, [...(columns.get(p.rect.x) ?? []), p.rect.height]);
-  assert.equal(columns.size, refs.length > 3 ? 2 : refs.length ? 1 : 0);
+  assert.ok(columns.size >= Math.ceil(refs.length / 3) && columns.size <= Math.min(2, refs.length));
   for (const heights of columns.values()) { assert.ok(heights.length <= 3); assert.ok(Math.max(...heights) - Math.min(...heights) <= 1); }
   for (const ref of refs) assert.equal(fake.panes.get(ref.paneId)?.terminal_id, ref.terminalId);
   assert.equal(fake.tabs.size, 1, "no staging tabs left");
@@ -50,9 +51,9 @@ test("refuse zoomed tab, principal replacement, moved or replaced children", asy
 test("mutating failure never falls back to layout.apply or closes workers", async () => {
   const { fake, layout } = setup(); const refs: PaneRef[] = [];
   await layout.add(refs, "/", {}, async r => { refs.push(r); });
-  fake.error = args => args[1] === "swap" ? new Error("accepted mutation timeout") : undefined;
+  fake.afterError = args => args[1] === "split" ? new HerdrError("accepted mutation timeout", "cli_timeout", true) : undefined;
   await assert.rejects(layout.add(refs, "/", {}, async r => { refs.push(r); }), /timeout/);
-  assert.equal(fake.panes.size, 4);
+  assert.equal(fake.panes.size, 3);
   assert.equal(fake.calls.filter(a => a[1] === "close").length, 0);
 });
 
@@ -92,13 +93,13 @@ function regionCheck(fake: Fake, refs: PaneRef[], region: Rect, external: string
     assert.ok(r.x + r.width <= region.x + region.width);
     columns.set(r.x, [...(columns.get(r.x) ?? []), r]);
   }
-  assert.equal(columns.size, refs.length > 3 ? 2 : refs.length ? 1 : 0);
+  assert.ok(columns.size >= Math.ceil(refs.length / 3) && columns.size <= Math.min(2, refs.length));
   for (const rows of columns.values()) {
     assert.ok(rows.length <= 3);
     assert.ok(Math.max(...rows.map(r => r.height)) - Math.min(...rows.map(r => r.height)) <= 1);
     assert.equal(Math.min(...rows.map(r => r.y)), region.y);
     assert.equal(rows.reduce((sum, r) => sum + r.height, 0), region.height);
-    for (const r of rows) assert.ok(Math.abs(r.width - region.width / (refs.length > 3 ? 4 : 2)) <= 1);
+    for (const r of rows) assert.ok(Math.abs(r.width - region.width / (columns.size * 2)) <= 1);
   }
   assert.equal(fake.tabs.size, 1, "staging disappears after assembly");
   assert.ok(fake.calls.every(a => !["split", "move", "close", "resize", "swap", "focus"].includes(a[1]) || !external.includes(a[2])), "no mutations target external panes");
@@ -167,7 +168,7 @@ test("preserve principal, selected child and external focus during reassembly", 
     await layout.compact(refs); assert.equal(fake.focus, saved);
   }
 });
-function mutations(fake: Fake) { return fake.calls.filter(a => ["split", "move", "create", "close", "resize", "swap"].includes(a[1])); }
+function mutations(fake: Fake) { return fake.calls.filter(a => ["split", "move", "create", "close", "resize", "swap", "set_split_ratio"].includes(a[1])); }
 test("reject external panes inside the owned subtree before any mutation", async () => {
   for (const action of ["add", "compact", "close"]) {
     const { fake, layout } = setup(), refs: PaneRef[] = [];
@@ -206,21 +207,53 @@ test("a rectangular union across separate user-owned subtrees is not a dedicated
   assert.deepEqual(fake.layout("original"), before); assert.equal(mutations(fake).length, count);
 });
 test("owned same-tab recovery tolerates unrelated panes and keeps terminal identities", async () => {
-  for (const swappedBeforeFailure of [0, 1]) {
+  for (const mutationBeforeFailure of [0, 1]) {
     const { fake, layout, external } = externalSetup("left"), refs: PaneRef[] = [];
-    for (let i = 0; i < 2; i++) await layout.add(refs, "/", {}, async ref => { refs.push(ref); });
+    for (let i = 0; i < 4; i++) await layout.add(refs, "/", {}, async ref => { refs.push(ref); });
     const before = externalSnapshot(fake, external);
-    let swapping = 0;
-    fake.error = args => args[1] === "swap" && swapping++ === swappedBeforeFailure ? new HerdrError("interrupted assembly", "swap_busy") : undefined;
+    let mutating = 0;
+    fake.error = args => ["split", "set_split_ratio"].includes(args[1]) && mutating++ === mutationBeforeFailure ? new HerdrError("interrupted birth", "pane_busy") : undefined;
     await assert.rejects(layout.add(refs, "/", {}, async ref => { refs.push(ref); }), /interrupted/);
     assert.ok(refs.every(ref => ref.tabId === "original" && !ref.staging));
     const saved = layout.state!;
     fake.error = undefined;
     const restored = new Layout(fake, paneRef(fake.panes.get("principal")), async () => {});
-    restored.load(saved); await restored.recover(refs);
+    restored.load(saved); await restored.recover(refs, false, async ref => { refs.push(ref); });
     assert.deepEqual(externalSnapshot(fake, external), before);
     for (const ref of refs) { assert.equal(ref.tabId, "original"); await layout.validate(ref); }
     assert.equal(fake.tabs.size, 1);
+  }
+});
+test("mixed birth/close histories preserve column order and external panes without swaps", async () => {
+  for (let seed = 1; seed <= 25; seed++) {
+    const { fake, layout, external } = externalSetup("surrounded"), refs: PaneRef[] = [];
+    let random = seed, births = 0;
+    const next = () => { random = (Math.imul(random, 1664525) + 1013904223) >>> 0; return random; };
+    const current = () => layoutColumns(snapshot(fake.layout("original")).tree, "principal", refs.map(r => r.paneId)).columns.map(c => c.ids);
+    for (let step = 0; step < 40; step++) {
+      const before = current(), user = externalSnapshot(fake, external);
+      let expected: string[][];
+      if (!refs.length || refs.length < 6 && next() % 3 !== 0) {
+        const ref = await layout.add(refs, "/test path", {}, async r => { refs.push(r); }); births++;
+        if (!before.length) expected = [[ref.paneId]];
+        else if (before.length === 1) expected = before[0].length === 1 ? [before[0], [ref.paneId]] : [[ref.paneId], before[0]];
+        else {
+          expected = before.map(col => [...col]);
+          expected[before[0].length <= before[1].length ? 0 : 1].push(ref.paneId);
+        }
+      } else {
+        const [ref] = refs.splice(next() % refs.length, 1);
+        await layout.close(ref, refs);
+        expected = before.map(col => col.filter(id => id !== ref.paneId)).filter(col => col.length);
+      }
+      assert.deepEqual(current(), expected); assert.deepEqual(externalSnapshot(fake, external), user);
+      const region = layoutColumns(snapshot(fake.layout("original")).tree, "principal", refs.map(r => r.paneId));
+      assert.ok(region.columns.every(col => col.ids.length <= 3));
+      for (const ref of refs) assert.equal(fake.panes.get(ref.paneId)!.terminal_id, ref.terminalId);
+    }
+    assert.equal(fake.calls.filter(a => a[1] === "split").length, births);
+    assert.ok(!fake.calls.some(a => ["swap", "move", "apply", "create"].includes(a[1])));
+    while (refs.length) { const ref = refs.pop()!; await layout.close(ref, refs); }
   }
 });
 test("inconsistent layout responses fail closed before creating or moving panes", async () => {

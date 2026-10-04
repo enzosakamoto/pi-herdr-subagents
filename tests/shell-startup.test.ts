@@ -138,7 +138,8 @@ test("stop during foreground waiting prevents launch intent and further CLI requ
 });
 test("a missing worker in a pending frame is retained for explicit transaction reconciliation", async t => {
   const h = await managerSetup(t), m = h.create(), source = h.reservation(m);
-  h.fake.error = a => a[1] === "swap" ? new HerdrError("refused", "pane_busy") : undefined;
+  const persist = m.hooks.persist; let interrupted = false;
+  m.hooks.persist = async task => { await persist(task); if (!interrupted && task.pane) { interrupted = true; throw new Error("attachment interrupted"); } };
   const b = await m.spawn("read only"); await eventually(() => m.task(b.taskId).state === "collection_failed");
   assert.ok(m.layout.pending); const id = source.pane!.paneId; h.remove(source); h.fake.error = undefined;
   const before = h.fake.calls.filter(a => ["split", "swap", "close", "start", "prompt"].includes(a[1])).length;
