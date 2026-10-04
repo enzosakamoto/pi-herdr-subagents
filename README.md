@@ -42,24 +42,52 @@ for trivial or strictly sequential work.
 
 - Six reserved/active children maximum; no capacity queue or recursive delegation.
 - Same cwd and final tab as the principal.
-- Initially the tab must contain only the principal and must not be zoomed.
-- With 1–3 children: principal left 50%, one child column right 50%.
+- The tab must not be zoomed. Existing user panes are allowed; they are never adopted, moved or closed.
+- Layout proportions use only the invoking principal pane's available region, not the whole tab.
+- With 1–3 children: principal left 50% of that region, one child column right 50%.
 - With 4–6: principal left 50%, two child columns of 25%, at most three balanced rows each.
 - After completion: persist the full result, deliver a task-tagged **follow-up**, then close
-  only the matching owned pane and compact survivors. With no children, restore the principal.
+  only the matching owned pane and compact survivors. With no children, restore the principal
+  to the whole local region, leaving external panes intact.
 - A result queued behind busy principal work is not delivery: its pane stays until the
   follow-up is actually admitted to the principal transcript.
 - Blocked/uncertain results stay visible. No approvals are sent automatically.
 
+Principal and children must remain in a dedicated BSP subtree. External panes outside it
+are allowed, including panes added later. If a user pane is inserted inside the owned subtree
+or a child is relocated outside it, layout control stops for reconciliation rather than
+reorganizing user work. Pre-existing panes, even empty shells, are not reused automatically.
+Relative splits follow the current window/region size; dimensions are not frozen at first spawn.
+
 ### Authorized BSP adaptation
 
-Herdr cannot reparent a pane within its own tab. Layout changes use a temporary
-`hs-staging` tab **in the same workspace**, moving the same live terminals out and back
-with `--no-focus`. No `layout.apply`, terminal recreation or worker restart.
-Staging tabs disappear when empty. Geometry is temporarily transitional during mutations.
-Final geometry/process continuity and principal/selected-child focus were tested live.
-A selected surviving child is restored if focus fell back to the principal; if the user
-selected another pane/tab/workspace during the mutation, the extension does not steal it.
+Layout changes use **same-tab auxiliary shells and explicit swaps**. Live children keep
+their pane, terminal, agent and session identities. No staging tabs, cross-tab moves,
+`layout.apply`, terminal recreation or worker restart. Auxiliary shells are not tasks
+and never receive pi launches or prompts; only proven owned shells are closed.
+Foreground shell PID/name/arguments are checked; unrecognized custom shells require
+intervention rather than being treated as safely idle. Short-lived foreground jobs or
+unavailable process metadata receive bounded waits; explicit identity changes still stop
+control. `status`/reload remove missing unstarted reservation links only after a definitive
+`pane_not_found`, without adopting replacements or physically closing other panes.
+
+Geometry is transitional: the principal/new grid temporarily share the principal leaf
+before recovering their settled local 50/50 region. Preflight requires **3×3 cells per
+owned pane at every step**, including temporary slots. Enlarge the region if it fails;
+there is no staging fallback.
+
+Herdr 0.9.3 swaps **temporarily focus the surviving source child**. Initial focus is
+restored when its occupant remains valid and the current selection still matches an
+extension-caused effect. Observed external focus changes pause further mutations; no
+atomic focus guarantee is possible. Selected completed children fall back to the principal.
+
+A private, versioned transaction journal and branch entries support safe recovery.
+`status` reconciles proven state without relaunching agents or resending prompts.
+Unknown split IDs, unproven swap outcomes, changed occupants/topology and foreign branch
+journals are not adopted or blindly retried. Unstarted owned shell reservations can be
+cancelled explicitly. Legacy cross-tab children require manual reconciliation; existing
+`hs-staging` tabs/plugin sidebars are never automatically cleaned up.
+This same-tab implementation has deterministic tests, **not new live validation**.
 
 ## Requirements and installation
 
@@ -70,7 +98,7 @@ selected another pane/tab/workspace during the mutation, the extension does not 
 | Lifecycle integration | Working pi integration; tested with v9 (`herdr integration status`) |
 | Runtime for development tests | Node 24+ and npm |
 
-Additional operating constraints: run the principal inside Herdr (`HERDR_ENV=1` with a managed caller pane), and provide model credentials usable by child pi processes. Sessions are separate, but **files, credentials, and OS permissions are shared**; assign disjoint write ownership. The initial tab must contain only the principal and must not be zoomed. See [Behavior and limits](#behavior-and-limits).
+Additional operating constraints: run the principal inside Herdr (`HERDR_ENV=1` with a managed caller pane), and provide model credentials usable by child pi processes. Sessions are separate, but **files, credentials, and OS permissions are shared**; assign disjoint write ownership. The tab must not be zoomed; existing user panes are permitted outside the principal/children subtree. See [Behavior and limits](#behavior-and-limits).
 The lifecycle integration is installed/updated separately; this package never changes `herdr-agent-state.ts` or your settings.
 
 Try without saving personal settings:
@@ -261,6 +289,13 @@ git diff --check
 Deterministic tests include all 720 deletion orders, independent observers,
 capacity, blocked/startup/cancellation failures, active branches, full responses,
 follow-up admission, exactly-once accounting, resource discovery and tool schemas.
+[Local-region layout coverage](docs/superpowers/plans/2026-10-03-principal-region-layout-verification.md)
+includes external panes in all directions, the eight-pane reference layout, resizing,
+external/child focus and historical staging recovery.
+[Same-tab coverage](docs/superpowers/plans/2026-10-03-same-tab-layout-verification.md)
+adds durable recovery at every mutation, lost responses, minimum geometry, focus changes,
+plugin hooks and branch provenance. Same-tab splits/swaps/process continuity still require
+separately authorized live validation in an isolated environment.
 Model-tier/thinking coverage includes config precedence/validation, null/off/omission,
 concurrent selections, legacy records and reloads, with temporary files and fake Herdr/model registries. Tier changes
 have no new live-model verification; textual guidance checks are not LLM behavioral evals.
@@ -279,6 +314,7 @@ runs retain panes/evidence for diagnosis. Live layout, two child TUI tasks, expl
 principal receiving follow-ups/accounting passed. Reload/branch/block edge cases
 have deterministic coverage, not a claim of exhaustive live fault-injection coverage.
 
+[Principal-region layout specification](docs/superpowers/specs/2026-10-03-principal-region-layout-design.md) ·
 [Thinking specification](docs/superpowers/specs/2026-10-03-tier-thinking-design.md) ·
 [Model-tier specification](docs/superpowers/specs/2026-10-03-model-tiers-design.md) ·
 [Specification](docs/superpowers/specs/2026-10-03-herdr-subagents-design.md) ·

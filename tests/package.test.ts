@@ -19,8 +19,9 @@ test("manifest discovery loads actual tool and skill with no diagnostics and no 
   const tools = [...loaded.extensions[0].tools.values()];
   assert.equal(tools.length, 1); assert.equal(tools[0].definition.name, "herdr_subagent");
   const tool = tools[0].definition;
-  for (const phrase of ["no explicit subagent request is needed", "low to run tests", "medium to map", "high for deep correctness review", "share filesystem/permissions", "follow-ups"])
+  for (const phrase of ["no explicit subagent request is needed", "low to run tests", "medium to map", "high for deep correctness review", "share filesystem/permissions", "follow-ups", "Requires an unzoomed tab", "Existing user panes are allowed", "invoking principal pane's region"])
     assert.ok(tool.description.includes(phrase), phrase);
+  assert.ok(!tool.description.includes("single-pane"));
   assert.ok(tool.promptGuidelines?.some(line => line.includes("Never automatically escalate")));
   for (const name of ["task", "instructions", "tier", "model", "taskId", "timeoutMs"]) {
     const objects = (parameters as unknown as { anyOf: { properties: Record<string, { description?: string }> }[] }).anyOf;
@@ -66,6 +67,9 @@ test("skill examples conform to the implemented schema and retain independent/de
     "Never automatically escalate", "low alone does not make the child cheaper", "mutually exclusive", "modelSource"])
     assert.ok(source.includes(phrase), phrase);
   assert.ok(!source.includes("Delegate only after the user authorizes"));
+  for (const phrase of ["Existing user-owned panes are allowed", "principal pane's available region", "not the whole tab", "dedicated BSP subtree", "Do not reuse pre-existing shells"])
+    assert.ok(source.includes(phrase), phrase);
+  assert.ok(!source.includes("initial tab must contain only the principal"));
   for (const phrase of ["thinking null means off", "Omitted thinking", "not proof of the effective level", "entire global entry"])
     assert.ok(source.includes(phrase), phrase);
 });

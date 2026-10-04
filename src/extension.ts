@@ -4,11 +4,13 @@ import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Herdr, type Control } from "./herdr.ts";
 import { paneRef } from "./layout.ts";
+import type { LayoutState } from "./layout-state.ts";
 import { Tasks, view, type Task } from "./tasks.ts";
 import { atomicJson, addUsage, zeroUsage, type Receipt } from "./results.ts";
 import { loadConfig, modelIdPattern, selectModel, selectThinking, splitModelId, tiers } from "./config.ts";
 
 const STATE = "herdr-subagents:task";
+const LAYOUT = "herdr-subagents:layout";
 const MESSAGE = "herdr-subagents:result";
 const ACCOUNTING = "herdrSubagentUsageTaskIds";
 const tierSchema = Type.Union(tiers.map(tier => Type.Literal(tier)));
@@ -81,12 +83,15 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
     const sessionId = ctx.sessionManager.getSessionId();
     const current = paneRef((await createControl().json(["pane", "current", "--current"])).pane);
     const records = new Map<string, Task>();
+    let branchLayout: LayoutState | null = null;
     const delivered = new Set<string>();
     const attentionDelivered = new Set<string>();
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE) {
         const task = entry.data as Task;
         if (task?.taskId) records.set(task.taskId, structuredClone(task));
+      } else if (entry.type === "custom" && entry.customType === LAYOUT) {
+        branchLayout = structuredClone(entry.data) as LayoutState;
       } else if (entry.type === "custom_message" && entry.customType === MESSAGE) {
         const data = entry.details as { taskId?: string; attention?: boolean };
         if (data?.taskId) { if (data.attention) attentionDelivered.add(data.taskId); else delivered.add(data.taskId); }
@@ -113,6 +118,7 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
       packagePath: resolve(dirname(fileURLToPath(import.meta.url)), "..")
     }, {
       persist: async task => { if (valid()) { pi.appendEntry(STATE, task); updateUI(); } },
+      persistLayout: async state => { if (valid()) pi.appendEntry(LAYOUT, state); },
       notify: async (task, attention) => {
         if (!valid()) throw new Error("Stale session callback; notification was not delivered.");
         const key = task.taskId + (attention ? ":attention" : ":result");
@@ -129,7 +135,7 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
     });
     if (!valid()) { await created.stop(); return; }
     manager = created;
-    await created.restore([...records.values()]);
+    await created.restore([...records.values()], branchLayout);
     updateUI();
   };
   pi.on("session_start", async (_event, ctx) => { await activate(ctx); });
@@ -164,7 +170,7 @@ export default function extension(pi: ExtensionAPI, createControl: () => Control
   });
   pi.registerTool({
     name: "herdr_subagent", label: "Herdr subagent", parameters, outputSchema,
-    description: "Autonomously delegate independent investigations, reviews or disjoint-file implementations to visible pi TUI children in Herdr; no explicit subagent request is needed. Respect user restrictions and avoid delegation overhead for trivial/sequential work. Choose the lowest adequate tier: low to run tests and report results; medium to map and understand a use-case flow; high for deep correctness review of a newly implemented class. Tiers map to user-configured models, not guaranteed prices or thinking levels; without mappings, inherit the principal model. Children receive only supplied context and share filesystem/permissions, not a sandbox. spawn returns after reservation; results arrive automatically as follow-ups. Maximum six; no queue/recursion. wait timeout never cancels/resubmits. Blocked requires human intervention. Requires an initially single-pane unzoomed tab.",
+    description: "Autonomously delegate independent investigations, reviews or disjoint-file implementations to visible pi TUI children in Herdr; no explicit subagent request is needed. Respect user restrictions and avoid delegation overhead for trivial/sequential work. Choose the lowest adequate tier: low to run tests and report results; medium to map and understand a use-case flow; high for deep correctness review of a newly implemented class. Tiers map to user-configured models, not guaranteed prices or thinking levels; without mappings, inherit the principal model. Children receive only supplied context and share filesystem/permissions, not a sandbox. spawn returns after reservation; results arrive automatically as follow-ups. Maximum six; no queue/recursion. wait timeout never cancels/resubmits. Blocked requires human intervention. Requires an unzoomed tab. Existing user panes are allowed and never adopted. Layout uses only the invoking principal pane's region: principal left 50%, children right 50%. Keep that owned subtree separate from user panes. Reassembly uses same-tab auxiliary shells and swaps, never staging tabs; native swaps transiently focus a child, then restore valid initial focus when safe. Requires 3×3 cells per owned pane throughout transitions. Pending or uncertain layout needs status reconciliation; never adopt unknown shells or blindly repeat swaps.",
     promptGuidelines: [
       "Delegate independent work autonomously when useful within the user's task; an explicit request for subagents is not required. Respect user prohibitions and approval boundaries. Define disjoint file write ownership.",
       "Choose the lowest adequate tier; medium is the general-purpose default. Running tests/reporting is low, understanding use-case flows is medium, deep logic/invariant/edge-case reviews are high. File size, test duration or the word review alone do not justify high. Never automatically escalate or rerun a failed task on a more expensive model; use explicit model only when the user specifies it.",
